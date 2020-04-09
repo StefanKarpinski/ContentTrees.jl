@@ -5,10 +5,10 @@ export
     verify_tree,
     extract_tree
 
-import Pkg.GitTools
 import Pkg.TOML
-import Tar
 import Random: randstring
+import SHA
+import Tar
 
 ## main API functions ##
 
@@ -131,6 +131,73 @@ function normalize_hash(hash::AbstractString, bits::Integer=160)
         throw(ArgumentError(msg))
     end
     return lowercase(hash)
+end
+
+## git tree hashing ##
+
+isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
+
+function tree_hash(root::AbstractString, HashType = SHA.SHA1_CTX)
+    entries = Tuple{String,String,Int}[]
+    for name in readdir(root)
+        name == ".git" && continue
+        path = joinpath(root, name)
+        stat = lstat(path)
+        mode = islink(stat) ? 0o120000 :
+                isdir(stat) ? 0o040000 :
+               isexec(stat) ? 0o100755 : 0o100644
+        hash = (isdir(stat) ? tree_hash : blob_hash)(path)
+        # TODO: skip empty tree hash
+        push!(entries, (name, hash, mode))
+    end
+
+    # sort entries by name (with trailing slashes for directories)
+    sort!(entries, by = ((name, hash, mode),) -> mode == 0o040000 ? "$name/" : name)
+
+    # precompute the tree record size
+    size = 0
+    for (name, hash, mode) in entries
+        size += ndigits(UInt32(mode); base=8) + ncodeunits(name) + 22
+    end
+
+    # return the hash of these entries
+    ctx = HashType()
+    SHA.update!(ctx, Vector{UInt8}("tree $size\0"))
+    for (name, hash, mode) in entries
+        SHA.update!(ctx, Vector{UInt8}("$mode $name\0"))
+        SHA.update!(ctx, hash)
+    end
+    return SHA.digest!(ctx)
+end
+
+function blob_hash(path::AbstractString, HashType = SHA.SHA1_CTX)
+    ctx = HashType()
+    link = islink(path)
+    target = link ? readlink(path) : nothing
+    size = link ? length(target) : filesize(path)
+    SHA.update!(ctx, Vector{UInt8}("blob $size\0"))
+    if link
+        update!(ctx, codeunits(target))
+    else
+        open(path, "r") do io
+            buf = Vector{UInt8}(undef, 4096)
+            while !eof(io)
+                n = readbytes!(io, buf)
+                update!(ctx, buf, n)
+            end
+        end
+    end
+    return SHA.digest!(ctx)
+end
+
+function contains_files(path::AbstractString)
+    st = lstat(path)
+    ispath(st) || throw(ArgumentError("non-existent path: $(repr(path))"))
+    isdir(st) || return true
+    for p in readdir(path)
+        contains_files(joinpath(path, p)) && return true
+    end
+    return false
 end
 
 end # module
