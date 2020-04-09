@@ -135,9 +135,17 @@ end
 
 ## git tree hashing ##
 
+const EMPTY_HASHES = IdDict{DataTypes,String}()
+
+function empty_hash(HashType::DataTypes)
+    get!(EMPTY_HASHES, HashTypes) do
+        tree_hash(mktempdir(), HashType)
+    end
+end
+
 isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
 
-function tree_hash(root::AbstractString, HashType = SHA.SHA1_CTX)
+function tree_hash(root::AbstractString, HashType::DataTypes = SHA.SHA1_CTX)
     entries = Tuple{String,String,Int}[]
     for name in readdir(root)
         name == ".git" && continue
@@ -146,8 +154,12 @@ function tree_hash(root::AbstractString, HashType = SHA.SHA1_CTX)
         mode = islink(stat) ? 0o120000 :
                 isdir(stat) ? 0o040000 :
                isexec(stat) ? 0o100755 : 0o100644
-        hash = (isdir(stat) ? tree_hash : blob_hash)(path)
-        # TODO: skip empty tree hash
+        if isdir(stat)
+            hash = tree_hash(path)
+            hash == empty_hash(HashType) && continue
+        else
+            hash = blob_hash(path)
+        end
         push!(entries, (name, hash, mode))
     end
 
@@ -171,10 +183,10 @@ function tree_hash(root::AbstractString, HashType = SHA.SHA1_CTX)
 end
 
 function blob_hash(path::AbstractString, HashType = SHA.SHA1_CTX)
-    ctx = HashType()
     link = islink(path)
     target = link ? readlink(path) : nothing
     size = link ? length(target) : filesize(path)
+    ctx = HashType()
     SHA.update!(ctx, Vector{UInt8}("blob $size\0"))
     if link
         update!(ctx, codeunits(target))
@@ -188,16 +200,6 @@ function blob_hash(path::AbstractString, HashType = SHA.SHA1_CTX)
         end
     end
     return SHA.digest!(ctx)
-end
-
-function contains_files(path::AbstractString)
-    st = lstat(path)
-    ispath(st) || throw(ArgumentError("non-existent path: $(repr(path))"))
-    isdir(st) || return true
-    for p in readdir(path)
-        contains_files(joinpath(path, p)) && return true
-    end
-    return false
 end
 
 end # module
