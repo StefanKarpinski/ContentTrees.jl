@@ -171,11 +171,10 @@ git_hash(path::AbstractString) =
     (isdir(path) ? git_tree_hash : git_blob_hash)(path)
 
 function git_tree_hash(root::AbstractString; HashType::DataTypes = SHA.SHA1_CTX)
-    if tree_info === nothing
-        tree_info_file = joinpath(root, ".tree_info.toml")
-        tree_info = isfile(joinpath(root, ".tree_info.toml")) ?
-            TOML.parsefile(tree_info_file) : Dict{String,Any}()
-    end
+    tree_info_file = joinpath(root, ".tree_info.toml")
+    tree_info = isfile(tree_info_file) ?
+        TOML.parsefile(tree_info_file) : Dict{String,Any}()
+    git_subtree_hash(tree_info, root; HashType)
 end
 
 const EMPTY_HASHES = IdDict{DataType,String}()
@@ -197,7 +196,7 @@ const DEFAULT_FEATURES = Dict(
 
 isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
 
-function git_classify(
+function git_type(
     tree_info::Dict{String,Any},
     sys_path::AbstractString,
     tar_path::AbstractString,
@@ -233,16 +232,18 @@ function git_classify(
 end
 
 function git_subtree_hash(
+    tree_info::Dict{String,Any},
     sys_path::AbstractString,
-    tar_path::AbstractString,
-    tree_info::Dict{String,Any};
+    tar_path::AbstractString = "";
     HashType::DataTypes = SHA.SHA1_CTX,
 )
     entries = Tuple{String,String,Int}[]
     for name in readdir(sys_path, sort=false)
         sys_path′ = joinpath(sys_path, name)
         tar_path′ = isempty(tar_path) ? name : "$tar_path/$name"
-        mode = git_mode(sys_path′, tar_path′, tree_info)
+        tar_type = git_type(tree_info, sys_path′, tar_path′)
+        if type == :symlink
+            
         if isdir(stat)
             hash = git_tree_hash(path; HashType, tree_info)
             hash == empty_hash(HashType) && continue
@@ -259,7 +260,7 @@ function git_subtree_hash(
         push!(entries, (name, hash, mode))
     end
     by((name, hash, mode)) = mode == 0o040000 ? "$name/" : name
-    sort!(entries, by = by)
+    sort!(entries; by)
 
     return git_object_hash("tree"; HashType) do out
         for (name, hash, mode) in entries
