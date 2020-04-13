@@ -70,7 +70,7 @@ function extract_tree(
     # make copies instead of symlinks on filesystems that can't symlink
     for (path, link) in symlinks
         target = joinpath(dirname(path), link)
-        cp(target, path)
+        ispath(target) && cp(target, path)
     end
     # construct tree_info data structure
     tree_info_file = joinpath(temp, ".tree_info.toml")
@@ -116,7 +116,7 @@ function temp_path(path::AbstractString)
     features = Dict{String,Bool}()
     link_path = joinpath(temp, "link")
     loglevel = Logging.min_enabled_level(current_logger())
-    features["symlinks"] = try
+    features["symlink"] = try
         disable_logging(Logging.Warn)
         symlink("target", link_path)
         true
@@ -130,9 +130,9 @@ function temp_path(path::AbstractString)
     file_path = joinpath(temp, "file")
     touch(file_path)
     chmod(file_path, 0o700)
-    features["executables"] = filemode(file_path) & 0o100 == 0o100
+    features["executable"] = filemode(file_path) & 0o100 == 0o100
     chmod(file_path, 0o600)
-    features["non-executables"] = filemode(file_path) & 0o100 == 0o000
+    features["non-executable"] = filemode(file_path) & 0o100 == 0o000
     rm(file_path)
     return temp, features
 end
@@ -170,7 +170,7 @@ end
 git_hash(path::AbstractString) =
     (isdir(path) ? git_tree_hash : git_blob_hash)(path)
 
-function git_tree_hash(root::AbstractString; HashType::DataTypes = SHA.SHA1_CTX)
+function git_tree_hash(root::AbstractString; HashType::DataType = SHA.SHA1_CTX)
     tree_info_file = joinpath(root, ".tree_info.toml")
     tree_info = isfile(tree_info_file) ?
         TOML.parsefile(tree_info_file) : Dict{String,Any}()
@@ -179,7 +179,7 @@ end
 
 const EMPTY_HASHES = IdDict{DataType,String}()
 
-function empty_hash(HashType::DataTypes)
+function empty_hash(HashType::DataType)
     get!(EMPTY_HASHES, HashTypes) do
         empty_tree = mktempdir()
         hash = git_subtree_hash(empty_tree; HashType)
@@ -189,9 +189,9 @@ function empty_hash(HashType::DataTypes)
 end
 
 const DEFAULT_FEATURES = Dict(
-    "symlinks" => true,
-    "executables" => true,
-    "non-executables" => true,
+    "symlink" => true,
+    "executable" => true,
+    "non-executable" => true,
 )
 
 isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
@@ -210,40 +210,44 @@ function git_type(
                        :file
 
     # look path in contents section of file info
-    haskey(tree_info, "contents") || return sys_type
-    haskey(tree_info["contents"], tar_path) || return :ignore
+    haskey(tree_info,"contents") || return sys_type, sys_type
+    haskey(tree_info["contents"], tar_path) || return sys_type, :ignore
     tar_type = tree_info["contents"]
     tar_type isa AbstractString ||
-        error("invalid entry in tree_info for $(repr(tar_path)): $(repr(tar_type))")
+        error("invalid contents entry for $(repr(tar_path)): $(repr(tar_type))"
     tar_type = Symbol(tar_type)
-    tar_type == sys_type && return tar_type
 
-    # handle missing features
-    features = get(tree_info, "features", DEFAULT_FEATURES)
-    tar_type == :symlink && sys_type != :symlink &&
-        !get(features, "symlinks", true) && return tar_type
-    tar_type == :executable && sys_type == :file &&
-        !get(features, "executables", true) && return tar_type
-    tar_type == :file && sys_type == :executable &&
-        !get(features, "non-executables", true) && return tar_type
+    if tar_type ≠ sys_type
+        # check validity of sys_type, tar_type combination
+        features       = get(tree_info, "features", DEFAULT_FEATURES)
+        symlink        = get(features, "symlink", true)::Bool
+        executable     = get(features, "executable", true)::Bool
+        non_executable = get(features, "non-executable", true)::Bool
+        expected =
+            tar_type == :symlink    && !symlink        ? sys_type    :
+            tar_type == :executable && !executable     ? :file       :
+            tar_type == :file       && !non_executable ? :executable : tar_type
+        sys_type == expected ||
+            error("path $(repr(sys_path)) is $sys_type, should be $expected")
+    end
 
-    # otherwise this is an invalid combination of types
-    error("invalid tree/path types for $(repr(tar_path)): $tar_type/$sys_type")
+    return sys_type, tar_type
 end
 
 function git_subtree_hash(
     tree_info::Dict{String,Any},
     sys_path::AbstractString,
     tar_path::AbstractString = "";
-    HashType::DataTypes = SHA.SHA1_CTX,
+    HashType::DataType = SHA.SHA1_CTX,
 )
     entries = Tuple{String,String,Int}[]
     for name in readdir(sys_path, sort=false)
         sys_path′ = joinpath(sys_path, name)
         tar_path′ = isempty(tar_path) ? name : "$tar_path/$name"
-        tar_type = git_type(tree_info, sys_path′, tar_path′)
-        if type == :symlink
-            
+        sys_type, tar_type = git_type(tree_info, sys_path′, tar_path′)
+        tar_type == :ignore && continue
+        if tar_type == :symlink
+
         if isdir(stat)
             hash = git_tree_hash(path; HashType, tree_info)
             hash == empty_hash(HashType) && continue
