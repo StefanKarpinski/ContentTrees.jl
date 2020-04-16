@@ -108,14 +108,17 @@ end
 ## type for representing `.tree_info.toml` data ##
 
 struct TreeInfo
-    path::String
+    root::String
     hash::String
     types::Dict{String,Symbol}
     hashes::Dict{String,String}
     symlinks::Dict{String,String}
 end
 
-function TreeInfo(file::AbstractString)
+function TreeInfo(root::AbstractString)
+    file = joinpath(root, ".tree_info.toml")
+    isdir(root) ||
+        error("no directory found at $root")
     ispath(file) ||
         error("no tree info found at $file")
     data = TOML.parsefile(file)
@@ -183,7 +186,7 @@ function TreeInfo(file::AbstractString)
             error("$(repr(path)) must have type symlink, not $type in $file")
     end
 
-    return TreeInfo(file, hash, types, hashes, symlinks)
+    return TreeInfo(root, hash, types, hashes, symlinks)
 end
 
 ## git hashing ##
@@ -192,9 +195,16 @@ git_hash(path::AbstractString) =
     (isdir(path) ? git_tree_hash : git_blob_hash)(path)
 
 function git_tree_hash(root::AbstractString; HashType::DataType = SHA.SHA1_CTX)
-    tree_info = TreeInfo(joinpath(root, ".tree_info.toml"))
-    return git_subtree_hash(tree_info, root; HashType)
+    return git_subtree_hash(TreeInfo(root), root; HashType)
 end
+
+const ALLOWED_SYS_TYPES = Dict(
+    :absent     => (:symlink, :directory, :executable, :file, :absent),
+    :directory  => (:directory,),
+    :executable => (:executable, :file),
+    :file       => (:file, :executable),
+    :symlink    => (:symlink, :directory, :executable, :file, :absent),
+)
 
 function git_subtree_hash(
     tree_info::TreeInfo,
@@ -204,34 +214,31 @@ function git_subtree_hash(
 )
     entries = Tuple{String,String,Int}[]
     for name in readdir(sys_path, sort=false)
-        let tar_path = isempty(tar_path) ? name : "$tar_path/$name",
-            sys_path = joinpath(sys_path, name)
+        let sys_path = joinpath(sys_path, name),
+            tar_path = isempty(tar_path) ? name : "$tar_path/$name"
 
-            # classify system and tarball types
+            # handle the `.tree_info.toml` file
+            
+
+            # classify tarball and system types
             tar_type = get(tree_info.types, tar_path, :absent)
+            tar_type == :absent && continue
+
             stat = lstat(sys_path)
             sys_type = islink(stat) ? :symlink    :
                         isdir(stat) ? :directory  :
                        isexec(stat) ? :executable :
-                       ispath(stat) ? :file       :
-                                      :absent
-            sys_type ∈ (allowed = ALLOWED_SYS_TYPES[tar_type]) ||
-                error("path $sys_path is $sys_type, should be $(allowed[1])")
+                                      :file
 
-            # handle path based on types
-            tar_type == :absent && continue
-            if tar_type == :symlink
-                link = tree_info.symlinks[tar_path]
-                if sys_type == :absent
-                    link ∉ keys(tree_info.types) ||
-                        error("")
-                else
-
-                end
+            # only some sys_types are acceptable proxies
+            if sys_type ∉ ALLOWED_SYS_TYPES[tar_type]
+                # if not in the allowed list, ignore the tar_type
+                tar_type = sys_type # will cause a hash mismatch
+                # TODO: optional warning
             end
 
-            if isdir(stat)
-                hash = git_tree_hash(path; HashType, tree_info)
+            if sys_type == :directory
+                hash = git_subtree_hash(tree_info, sys_path, tar_path; HashType)
                 hash == empty_hash(HashType) && continue
             else
                 if skip_tree_info && name == ".tree_info.toml"
@@ -243,6 +250,17 @@ function git_subtree_hash(
                     hash = git_blob_hash(path; HashType)
                 end
             end
+
+            # a symlink may be replaced by a copy of the target
+            if tar_type == :symlink && sys_type != :symlink
+                tar_link = tree_info.symlinks[tar_path]
+                # but only if the link target is also in the tree
+                if tar_link ∈ keys(tree_info.types)
+                    sys_link = 
+                    link_hash = git_subtree_hash()
+                end
+            end
+
             push!(entries, (name, hash, mode))
         end
     end
@@ -274,14 +292,6 @@ function git_object_hash(emit::Function, kind::AbstractString; HashType::DataTyp
     SHA.update!(ctx, body)
     return bytes2hex(SHA.digest!(ctx))
 end
-
-const ALLOWED_SYS_TYPES = Dict(
-    :absent     => (:symlink, :directory, :executable, :file, :absent),
-    :directory  => (:directory,),
-    :executable => (:executable, :file),
-    :file       => (:file, :executable),
-    :symlink    => (:symlink, :directory, :executable, :file, :absent),
-)
 
 isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
 
