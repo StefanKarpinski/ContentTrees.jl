@@ -79,7 +79,7 @@ function extract_tree(
         for (tar_path, link) in symlinks
             sys_path = joinpath(root, tar_path)
             target = joinpath(dirname(sys_path), link)
-            if is_internal_path(root, target) && ispath(target)
+            if is_tree_path(root, target) && ispath(target)
                 cp(target, sys_path)
             end
         end
@@ -228,7 +228,7 @@ function git_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX)
     stat = lstat(path)
     islink(stat) && return git_link_hash(path; HashType)
     isfile(stat) && return git_file_hash(path; HashType)
-    isdir(stat)  && return git_tree_hash(TreeInfo(path), path; HashType)
+    isdir(stat)  && return git_tree_hash(path; HashType)
     error("unsupported file type for git hashing: $path")
 end
 
@@ -244,6 +244,9 @@ function git_file_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX)
     end
 end
 
+git_tree_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX) =
+    git_tree_hash(TreeInfo(path), path; HashType)
+
 function path_type(path::AbstractString)
     stat = lstat(sys_path)
     ispath(stat) || return :absent
@@ -254,11 +257,11 @@ function path_type(path::AbstractString)
     error("unexpected file type: $path")
 end
 
-const ALLOWED_SYS_TYPES = Dict(
-    :directory  => (:directory,),
-    :executable => (:executable, :file),
-    :file       => (:file, :executable),
-    :symlink    => (:symlink, :directory, :executable, :file, :absent),
+const REPLACEMENT_TYPES = Dict{Symbol,Vector{Symbol}}(
+    :directory  => [],
+    :executable => [:file],
+    :file       => [:executable]
+    :symlink    => [:directory, :executable, :file]
 )
 
 function git_tree_hash(
@@ -282,11 +285,6 @@ function git_tree_hash(
             else
                 sys_type = path_type(sys_path)
 
-                # only some sys_types are acceptable replacements
-                if sys_type ∉ ALLOWED_SYS_TYPES[tar_type]
-                    tar_type = sys_type # will cause a hash mismatch
-                end
-
                 function hash_path(sys_type, sys_path, tar_path)
                     if sys_type == :directory
                         git_tree_hash(tree_info, sys_path, tar_path; HashType)
@@ -298,18 +296,24 @@ function git_tree_hash(
                 end
                 hash = hash_path(sys_type, sys_path, tar_path)
 
-                # a symlink may be replaced by a copy of the target
-                if tar_type == :symlink && sys_type != :symlink
+                # only some sys_types are acceptable replacements
+                if sys_type ≠ tar_type && sys_type ∉ REPLACEMENT_TYPES[tar_type]
+                    tar_type = sys_type # will cause a hash mismatch
+                elseif tar_type == :symlink && sys_type != :symlink
+                    # a symlink may be replaced by a copy of the target
                     tar_target = tree_info.symlinks[tar_path]
                     sys_target = joinpath(dirname(sys_path), tar_target)
-                    if is_internal_path(root, sys_target)
+                    if is_tree_path(root, sys_target)
                         sys_target_type = path_type(sys_target)
-                        hash′ = hash_path(sys_target, sys_target_type, tar_target)
-                        # check that contents of sys_path and sys_target match
+                        if sys_target_type != :absent
+                            hash′ = hash_path(sys_target, sys_target_type, tar_target)
+                        end
                     else
                         hash′ = nothing
                     end
+                    # check that contents of sys_path and sys_target match
                     if hash == hash′
+                        # if so, hash it as if it were a symlink to tar_target
                         hash = git_object_hash("blob"; HashType) do io
                             write(io, tar_target)
                         end
@@ -360,6 +364,9 @@ end
 
 ## helper functions ##
 
+is_tree_path(root::AbstractString, path::AbstractString) =
+    startswith(normpath(path), normpath(root))
+
 function temp_path(path::AbstractString)
     temp = "$path.$(randstring(8)).tmp"
     mkdir(temp)
@@ -407,8 +414,5 @@ function normalize_hash(hash::AbstractString, bits::Integer=160)
     end
     return lowercase(hash)
 end
-
-is_internal_path(root::AbstractString, path::AbstractString) =
-    startswith(normpath(path), normpath(root))
 
 end # module
