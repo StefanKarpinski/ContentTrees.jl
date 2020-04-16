@@ -1,9 +1,6 @@
 module ContentTrees
 
-export
-    check_tree,
-    verify_tree,
-    extract_tree
+export extract_tree
 
 import Logging
 import Pkg.TOML
@@ -14,9 +11,9 @@ import Tar
 ## main API functions ##
 
 function extract_tree(
-    root::AbstractString,
-    hash::AbstractString,
     tarball::AbstractString,
+    hash::AbstractString,
+    root::AbstractString,
 )
     temp, can_symlink = temp_path(root)
 
@@ -59,12 +56,14 @@ function extract_tree(
     # construct tree_info data structure
     tree_info_file = joinpath(temp, ".tree_info.toml")
     tree_info = Dict{String,Any}("git-tree-sha1" => hash)
-    !isempty(types) && (tree_info["types"] = types)
+    !isempty(types) && (tree_info["contents"] = types)
     !isempty(symlinks) && (tree_info["symlinks"] = symlinks)
 
     # if tree_info path exists, save its git hash
-    haskey(types, ".tree_info.toml") && tree_info["hashes"] =
-        Dict(".tree_info.toml" => git_hash(tree_info_file))
+    if haskey(types, ".tree_info.toml")
+        tree_info["hashes"] =
+            Dict(".tree_info.toml" => git_hash(tree_info_file))
+    end
 
     # write the tree_info file
     if ispath(tree_info_file)
@@ -77,11 +76,11 @@ function extract_tree(
     end
 
     # verify the tree
-    calc_hash = git_hash(temp)
-    if calc_hash != tree_hash
+    hash′ = git_hash(temp)
+    if hash′ != hash
         msg  = "Tree hash mismatch!\n"
-        msg *= "  Expected SHA1: $tree_hash\n"
-        msg *= "  Computed SHA1: $calc_hash"
+        msg *= "  Expected SHA1: $hash\n"
+        msg *= "  Computed SHA1: $hash′"
         rm(temp, recursive=true)
         error(msg)
     end
@@ -124,12 +123,12 @@ function TreeInfo(root::AbstractString)
 
     # extract and validate types dict
     types = Dict{String,Symbol}()
-    if haskey(data, "types")
-        data["types"] isa Dict{<:AbstractString,Any} ||
+    if haskey(data, "contents")
+        data["contents"] isa Dict{<:AbstractString,Any} ||
             error("[types] must be a TOML table in $file")
-        for (path, type) in data["types"]
+        for (path, type) in data["contents"]
             type in ("symlink", "directory", "executable", "file") ||
-                error("invalid type $(repr(type)) for $(repr(path)) in $file"))
+                error("invalid type $(repr(type)) for $(repr(path)) in $file")
             types[path] = Symbol(type)
         end
     end
@@ -178,14 +177,14 @@ function TreeInfo(root::AbstractString)
 
     # symlink type paths must have symlinks entries
     for (path, type) in types
-        haskey(symlinks, path) ||
+        type == :symlink && path ∉ keys(symlinks) &&
             error("missing [symlinks] entry $(repr(path)) in $file")
     end
 
     # entries in symlinks must have type symlink
     for path in keys(symlinks)
         haskey(types, path) ||
-            error("missing [types] entry $(repr(path)) in $file")
+            error("missing [types] entry for symlink $(repr(path)) in $file")
         (type = types[path]) == :symlink ||
             error("$(repr(path)) must have type symlink, not $type in $file")
     end
@@ -219,7 +218,7 @@ git_tree_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX) =
     git_tree_hash(TreeInfo(path), path; HashType)
 
 function path_type(path::AbstractString)
-    stat = lstat(sys_path)
+    stat = lstat(path)
     ispath(stat) || return :absent
     islink(stat) && return :symlink
      isdir(stat) && return :directory
@@ -228,11 +227,11 @@ function path_type(path::AbstractString)
     error("unexpected file type: $path")
 end
 
-const REPLACEMENT_TYPES = Dict{Symbol,Vector{Symbol}}(
-    :directory  => [],
+const REPLACEMENT_TYPES = Dict(
+    :directory  => Symbol[],
     :executable => [:file],
-    :file       => [:executable]
-    :symlink    => [:directory, :executable, :file]
+    :file       => [:executable],
+    :symlink    => [:directory, :executable, :file],
 )
 
 function git_tree_hash(
@@ -241,7 +240,7 @@ function git_tree_hash(
     tar_path::AbstractString = "";
     HashType::DataType = SHA.SHA1_CTX,
 )
-    entries = Tuple{String,String,Int}[]
+    entries = Tuple{String,Symbol,String}[]
     for name in readdir(sys_path, sort=false)
         let sys_path = joinpath(sys_path, name),
             tar_path = isempty(tar_path) ? name : "$tar_path/$name"
@@ -333,7 +332,7 @@ end
 
 ## helper functions ##
 
-isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
+isexec(stat::Base.Filesystem.StatStruct) = (filemode(stat) & 0o100) ≠ 0
 
 is_tree_path(root::AbstractString, path::AbstractString) =
     startswith(normpath(path), normpath(root))
@@ -343,16 +342,16 @@ function temp_path(path::AbstractString)
     mkdir(temp)
     Base.Filesystem.temp_cleanup_later(temp)
     link_path = joinpath(temp, "link")
-    loglevel = Logging.min_enabled_level(current_logger())
+    loglevel = Logging.min_enabled_level(Logging.current_logger())
     can_symlink = try
-        disable_logging(Logging.Warn)
+        Logging.disable_logging(Logging.Warn)
         symlink("target", link_path)
         true
     catch err
         err isa Base.IOError || rethrow()
         false
     finally
-        disable_logging(loglevel-1)
+        Logging.disable_logging(loglevel-1)
         rm(link_path; force=true)
     end
     return temp, can_symlink
