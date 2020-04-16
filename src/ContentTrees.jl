@@ -68,8 +68,8 @@ function extract_tree(
 
     # populate types with all directories
     for path in keys(types)
-        while (m = match(r"^(.*)/+[^/]$", path)) !== nothing
-            path = m.captures[1]
+        while (m = match(r"^(.*[^/])/+[^/]$", path)) !== nothing
+            path = String(m.captures[1])
             types[path] = :directory
         end
     end
@@ -79,8 +79,9 @@ function extract_tree(
         for (tar_path, link) in symlinks
             sys_path = joinpath(root, tar_path)
             target = joinpath(dirname(sys_path), link)
-            # TODO: refuse to copy target outside of tree
-            ispath(target) && cp(target, path)
+            if is_internal_path(root, target) && ispath(target)
+                cp(target, sys_path)
+            end
         end
     end
 
@@ -105,7 +106,7 @@ function extract_tree(
     end
 
     # verify the tree
-    calc_hash = git_tree_hash(temp)
+    calc_hash = git_hash(temp)
     if calc_hash != tree_hash
         msg  = "Tree hash mismatch!\n"
         msg *= "  Expected SHA1: $tree_hash\n"
@@ -165,7 +166,7 @@ function TreeInfo(root::AbstractString)
     # ensure that all directories are included
     for path in keys(types)
         leaf = path
-        while (m = match(r"^(.*)/+[^/]$", path)) !== nothing
+        while (m = match(r"^(.*[^/])/+[^/]$", path)) !== nothing
             path = m.captures[1]
             haskey(types, path) ||
                 error("[types] missing $(repr(path)) containing $(repr(leaf))")
@@ -300,11 +301,14 @@ function git_tree_hash(
                 # a symlink may be replaced by a copy of the target
                 if tar_type == :symlink && sys_type != :symlink
                     tar_target = tree_info.symlinks[tar_path]
-                    # TODO: make sure target is inside of tarball
                     sys_target = joinpath(dirname(sys_path), tar_target)
-                    sys_target_type = path_type(sys_target)
-                    hash′ = hash_path(sys_target, sys_target_type, tar_target)
-                    # check that contents of sys_path and sys_target match
+                    if is_internal_path(root, sys_target)
+                        sys_target_type = path_type(sys_target)
+                        hash′ = hash_path(sys_target, sys_target_type, tar_target)
+                        # check that contents of sys_path and sys_target match
+                    else
+                        hash′ = nothing
+                    end
                     if hash == hash′
                         hash = git_object_hash("blob"; HashType) do io
                             write(io, tar_target)
@@ -403,5 +407,8 @@ function normalize_hash(hash::AbstractString, bits::Integer=160)
     end
     return lowercase(hash)
 end
+
+is_internal_path(root::AbstractString, path::AbstractString) =
+    startswith(normpath(path), normpath(root))
 
 end # module
