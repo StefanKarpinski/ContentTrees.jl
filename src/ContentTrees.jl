@@ -13,35 +13,6 @@ import Tar
 
 ## main API functions ##
 
-function check_tree(
-    root::AbstractString,
-    hash::AbstractString,
-)
-    file = joinpath(root, ".tree_info.toml")
-    if !isfile(file)
-        @error "not a content tree" root
-        return false
-    end
-    tree_info = try
-        TOML.parsefile(file)
-    catch err
-        @error "invalid TOML file" file err
-        return false
-    end
-    tree_hash = get(tree_info, "git-tree-sha1"), nothing)
-    if tree_hash === nothing
-        @error "no `git-tree-sha1` entry" file
-        return false
-    end
-    hash = normalize_hash(hash)
-    tree_hash = normalize_hash(tree_hash)
-    return hash == tree_hash
-end
-
-function fsck_tree(root::AbstractString)
-    # check contents, fixup if possible, otherwise fail
-end
-
 function extract_tree(
     root::AbstractString,
     hash::AbstractString,
@@ -349,8 +320,6 @@ function git_object_hash(emit::Function, kind::AbstractString; HashType::DataTyp
     return bytes2hex(SHA.digest!(ctx))
 end
 
-isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
-
 const EMPTY_HASHES = IdDict{DataType,String}()
 
 function empty_hash(tree_info::TreeInfo, HashType::DataType)
@@ -363,6 +332,8 @@ function empty_hash(tree_info::TreeInfo, HashType::DataType)
 end
 
 ## helper functions ##
+
+isexec(stat::Base.Filesystem.StatStruct) = filemode(stat) & 0o100
 
 is_tree_path(root::AbstractString, path::AbstractString) =
     startswith(normpath(path), normpath(root))
