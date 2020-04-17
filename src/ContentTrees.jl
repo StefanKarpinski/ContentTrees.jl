@@ -18,12 +18,12 @@ function extract_tree(
     temp, can_symlink = temp_path(root)
 
     # extract tarball, recording contents & symlinks
-    types = Dict{String,String}()
+    types = Dict{String,Symbol}()
     symlinks = Dict{String,String}()
     open(`gzcat $tarball`) do io
         Tar.extract(io, temp) do hdr
             executable = hdr.type == :file && (hdr.mode & 0o100) != 0
-            types[hdr.path] = executable ? "executable" : string(hdr.type)
+            types[hdr.path] = executable ? :executable : hdr.type
             if hdr.type == :symlink
                 symlinks[hdr.path] = hdr.link
                 return can_symlink
@@ -36,7 +36,7 @@ function extract_tree(
 
     # populate types with all directories
     for path in keys(types)
-        while (m = match(r"^(.*[^/])/+[^/]$", path)) !== nothing
+        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
             path = String(m.captures[1])
             types[path] = :directory
         end
@@ -136,7 +136,7 @@ function TreeInfo(root::AbstractString)
     # ensure that all directories are included
     for path in keys(types)
         leaf = path
-        while (m = match(r"^(.*[^/])/+[^/]$", path)) !== nothing
+        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
             path = m.captures[1]
             haskey(types, path) ||
                 error("[types] missing $(repr(path)) containing $(repr(leaf))")
@@ -240,7 +240,7 @@ function git_tree_hash(
     tar_path::AbstractString = "";
     HashType::DataType = SHA.SHA1_CTX,
 )
-    entries = Tuple{String,Symbol,String}[]
+    entries = Tuple{Symbol,String,String}[]
     for name in readdir(sys_path, sort=false)
         let sys_path = joinpath(sys_path, name),
             tar_path = isempty(tar_path) ? name : "$tar_path/$name"
@@ -292,21 +292,22 @@ function git_tree_hash(
                     end
                 end
             end
-            push!(entries, (name, tar_type, hash))
+            push!(entries, (tar_type, hash, name))
         end
     end
 
     # sort entries the same way git does
-    by((name, type, hash)) = type == :directory ? "$name/" : name
+    by((type, hash, name)) = type == :directory ? "$name/" : name
     sort!(entries; by)
 
     return git_object_hash("tree"; HashType) do io
-        for (name, type, hash) in entries
+        for (type, hash, name) in entries
             mode = type == :directory  ?  "40000" :
                    type == :executable ? "100755" :
                    type == :file       ? "100644" :
                    type == :symlink    ? "120000" : @assert false
-            print(io, mode, ' ', name, '\0', hash)
+            print(io, mode, ' ', name, '\0')
+            write(io, hex2bytes(hash))
         end
     end
 end
