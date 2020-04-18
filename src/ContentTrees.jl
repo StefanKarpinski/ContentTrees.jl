@@ -18,61 +18,54 @@ function extract_tree(
     temp, can_symlink = temp_path(root)
 
     # extract tarball, recording contents & symlinks
-    types = Dict{String,Symbol}()
-    symlinks = Dict{String,String}()
+    paths = Dict{String,Dict{Symbol,String}}()
     open(`gzcat $tarball`) do io
         Tar.extract(io, temp) do hdr
+            is_valid_tar_path(hdr.path) ||
+                error("invalid tarball path: $(repr(hdr.path))")
             executable = hdr.type == :file && (hdr.mode & 0o100) != 0
-            types[hdr.path] = executable ? :executable : hdr.type
+            info = Dict(:type => executable ? "executable" : string(hdr.type))
             if hdr.type == :symlink
-                symlinks[hdr.path] = hdr.link
-                return can_symlink
-            else
-                delete!(symlinks, hdr.path)
-                return true
+                info[:link] = hdr.link
             end
-        end
-    end
-
-    # populate types with all directories
-    for path in keys(types)
-        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
-            path = String(m.captures[1])
-            types[path] = :directory
+            paths[hdr.path] = info
+            return hdr.type ≠ :symlink || can_symlink
         end
     end
 
     # make copies instead of symlinks on filesystems that can't symlink
     if !can_symlink
-        for (tar_path, link) in symlinks
+        for (tar_path, info) in paths
+            paths[:type] == :symlink || continue
             sys_path = joinpath(root, tar_path)
             target = joinpath(dirname(sys_path), link)
             if is_tree_path(root, target) && ispath(target)
-                cp(target, sys_path)
+                cp(target, sys_path) # TODO: what about circularity?
             end
         end
     end
 
-    # construct tree_info data structure
-    tree_info_file = joinpath(temp, ".tree_info.toml")
-    tree_info = Dict{String,Any}("git-tree-sha1" => hash)
-    !isempty(types) && (tree_info["contents"] = types)
-    !isempty(symlinks) && (tree_info["symlinks"] = symlinks)
-
-    # if tree_info path exists, save its git hash
-    if haskey(types, ".tree_info.toml")
-        tree_info["hashes"] =
-            Dict(".tree_info.toml" => git_hash(tree_info_file))
+    # populate all directories
+    paths["."] = Dict(:type => "directory", :hash => hash)
+    for path in keys(paths)
+        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
+            path = String(m.captures[1])
+            path in keys(paths) || continue
+            paths[path] = Dict(:type => "directory")
+        end
     end
 
-    # write the tree_info file
-    if ispath(tree_info_file)
-        @assert haskey(tree_info["hashes"], ".tree_info.toml")
+    # if tree_info path exists, save its git hash
+    tree_info_file = joinpath(temp, ".tree_info.toml")
+    if haskey(paths, ".tree_info.toml")
+        paths[".tree_info.toml"][:hash] = git_hash(tree_info_file)
         @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
         rm(tree_info_file, recursive=true)
     end
+
+    # write the tree_info file
     open(tree_info_file, write=true) do io
-        TOML.print(io, sorted=true, tree_info)
+        TOML.print(io, sorted=true, paths)
     end
 
     # verify the tree
@@ -81,7 +74,7 @@ function extract_tree(
         msg  = "Tree hash mismatch!\n"
         msg *= "  Expected SHA1: $hash\n"
         msg *= "  Computed SHA1: $hash′"
-        rm(temp, recursive=true)
+        # rm(temp, recursive=true)
         error(msg)
     end
 
@@ -93,103 +86,83 @@ end
 
 ## type for representing `.tree_info.toml` data ##
 
-struct TreeInfo
-    root::String
+mutable struct PathInfo
+    type::Symbol
+    link::String
     hash::String
-    types::Dict{String,Symbol}
-    hashes::Dict{String,String}
-    symlinks::Dict{String,String}
+    PathInfo(type::Union{Symbol,AbstractString}) = new(Symbol(type))
 end
 
-function TreeInfo(root::AbstractString)
+function tree_info(root::AbstractString)
     file = joinpath(root, ".tree_info.toml")
     isdir(root) ||
         error("no directory found at $root")
     ispath(file) ||
-        error("no tree info found at $file")
+        error("no tree info file found at $file")
     data = TOML.parsefile(file)
 
     # extract and validate the git tree hash
-    haskey(data, "git-tree-sha1") ||
-        error("git-tree-sha1 missing in $file")
-    hash = data["git-tree-sha1"]
-    hash isa AbstractString ||
-        error("git-tree-sha1 must be a string in $file")
-    hash = try normalize_hash(hash)
-    catch err
-        err isa ArgumentError || rethrow()
-        error("invalid git-tree-sha1 value in $file:\n$(err.msg)")
-    end
+    haskey(data, ".") ||
+        error("missing root entry in $file")
 
-    # extract and validate types dict
-    types = Dict{String,Symbol}()
-    if haskey(data, "contents")
-        data["contents"] isa Dict{<:AbstractString,Any} ||
-            error("[types] must be a TOML table in $file")
-        for (path, type) in data["contents"]
-            type in ("symlink", "directory", "executable", "file") ||
-                error("invalid type $(repr(type)) for $(repr(path)) in $file")
-            types[path] = Symbol(type)
+    # extract and validiate path entries
+    paths = Dict{String,PathInfo}()
+    for (path, info) in data
+        # validate the path itself
+        is_valid_tar_path(path) ||
+            error("contains invalid path: $(repr(path)) in $file")
+        # get the path type
+        haskey(info, "type") ||
+            error("missing `type` field for $path in $file")
+        type = info["type"]
+        type in ("symlink", "directory", "executable", "file") ||
+            error("invalid `type` field, $(repr(type)), for $path in $file")
+        type = Symbol(type)
+        path_info = PathInfo(type)
+        # ensure link field iff symlink
+        if type == :symlink
+            haskey(info, "link") ||
+                error("missing `link` field for symlink $path in $file")
+            link = info["link"]
+            link isa AbstractString ||
+                error("invalid `link` field, $(repr(link)), for $path in $file")
+            path_info.link = link
+        else
+            haskey(info, "link") &&
+                error("`link` field present for non-symlink $path in $file")
+        end
+        # validate hash field if there is one
+        if haskey(info, "hash")
+            hash = info["hash"]
+            hash isa AbstractString ||
+                error("invalid `hash` value, $(repr(hash)), for $path in $file")
+            hash = try normalize_hash(hash)
+            catch err
+                err isa ArgumentError || rethrow()
+                error("invalid `hash`, $(repr(hash)), for $path in $file:\n$(err.msg)")
+            end
+            path_info.hash = hash
+        end            
+        # `.tree_info.toml` must have a hash
+        if path == ".tree_info.toml"
+            isdefined(path_info, :hash) ||
+                error("missing required hash value for $path in $file")
         end
     end
 
     # ensure that all directories are included
-    for path in keys(types)
+    for path in keys(paths)
         leaf = path
         while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
-            path = m.captures[1]
-            haskey(types, path) ||
-                error("[types] missing $(repr(path)) containing $(repr(leaf))")
-            types[path] == :directory ||
-                error("[types] non-directory $(repr(path)) containing $(repr(leaf))")
+            path = String(m.captures[1])
+            path in keys(paths) ||
+                error("missing entry for directory $(repr(path)) in $file")
+            paths[path].type == :directory ||
+                error("path $path not a directory but contains $(repr(leaf)) in $file")
         end
     end
 
-    # extract and validate hashes dict
-    hashes = Dict{String,String}()
-    if haskey(data, "hashes")
-        data["hashes"] isa Dict{<:AbstractString,Any} ||
-            error("[hashes] must be a TOML table in $file")
-        for (path, hash) in data["hashes"]
-            hash = try normalize_hash(hash)
-            catch err
-                err isa ArgumentError || rethrow()
-                error("invalid SHA1 hash for $(repr(path)) in $file:\n$(err.msg)")
-            end
-            hashes[path] = hash
-        end
-    end
-
-    # check `.tree_info.toml` in types => `.tree_info.toml` in hashes
-    if ".tree_info.toml" ∈ keys(types) && ".tree_info.toml" ∉ keys(hashes)
-        error("missing hash for overwritten `.tree_info.toml` in $file")
-    end
-
-    # extract and validate symlinks dict
-    symlinks = Dict{String,String}()
-    if haskey(data, "symlinks")
-        data["symlinks"] isa Dict{<:AbstractString,Any} ||
-            error("[symlinks] must be a TOML table in $file")
-        for (path, link) in data["symlinks"]
-            symlinks[path] = link
-        end
-    end
-
-    # symlink type paths must have symlinks entries
-    for (path, type) in types
-        type == :symlink && path ∉ keys(symlinks) &&
-            error("missing [symlinks] entry $(repr(path)) in $file")
-    end
-
-    # entries in symlinks must have type symlink
-    for path in keys(symlinks)
-        haskey(types, path) ||
-            error("missing [types] entry for symlink $(repr(path)) in $file")
-        (type = types[path]) == :symlink ||
-            error("$(repr(path)) must have type symlink, not $type in $file")
-    end
-
-    return TreeInfo(root, hash, types, hashes, symlinks)
+    return paths
 end
 
 ## git hashing ##
@@ -215,7 +188,7 @@ function git_file_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX)
 end
 
 git_tree_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX) =
-    git_tree_hash(TreeInfo(path), path; HashType)
+    git_tree_hash(tree_info(path), path; HashType)
 
 function path_type(path::AbstractString)
     stat = lstat(path)
@@ -235,7 +208,7 @@ const REPLACEMENT_TYPES = Dict(
 )
 
 function git_tree_hash(
-    tree_info::TreeInfo,
+    paths::Dict{String,PathInfo},
     sys_path::AbstractString,
     tar_path::AbstractString = "";
     HashType::DataType = SHA.SHA1_CTX,
@@ -246,18 +219,20 @@ function git_tree_hash(
             tar_path = isempty(tar_path) ? name : "$tar_path/$name"
 
             # classify tarball and system types
-            tar_type = get(tree_info.types, tar_path, :absent)
-            tar_type == :absent && continue
+            tar_path in keys(paths) || continue
+            path_info = paths[tar_path]
+            tar_type = path_info.type
 
             # handle the `.tree_info.toml` file
             if tar_path == ".tree_info.toml"
-                hash = tree_info.hashes[tar_path]
+                hash = path_info.hash
             else
                 sys_type = path_type(sys_path)
 
+                # compute the hash of the system path
                 function hash_path(sys_type, sys_path, tar_path)
                     if sys_type == :directory
-                        git_tree_hash(tree_info, sys_path, tar_path; HashType)
+                        git_tree_hash(paths, sys_path, tar_path; HashType)
                     elseif sys_type == :symlink
                         git_link_hash(sys_path; HashType)
                     else
@@ -266,26 +241,28 @@ function git_tree_hash(
                 end
                 hash = hash_path(sys_type, sys_path, tar_path)
 
+                # empty subtrees don't contribute to the git hash
+                tar_type == :directory && hash == empty_tree(HashType) && continue
+
                 # only some sys_types are acceptable replacements
                 if sys_type ≠ tar_type && sys_type ∉ REPLACEMENT_TYPES[tar_type]
                     tar_type = sys_type # will cause a hash mismatch
                 elseif tar_type == :symlink && sys_type != :symlink
                     # a symlink may be replaced by a copy of the target
-                    tar_target = tree_info.symlinks[tar_path]
-                    sys_target = joinpath(dirname(sys_path), tar_target)
-                    if is_tree_path(root, sys_target)
-                        sys_target_type = path_type(sys_target)
-                        if sys_target_type != :absent
-                            hash′ = hash_path(sys_target, sys_target_type, tar_target)
+                    target = joinpath(dirname(sys_path), path_info.link)
+                    if is_tree_path(root, target)
+                        target_type = path_type(target)
+                        if target_type != :absent
+                            hash′ = hash_path(target, target_type, path_info.link)
                         end
                     else
                         hash′ = nothing
                     end
-                    # check that contents of sys_path and sys_target match
+                    # check that contents of sys_path and target match
                     if hash == hash′
-                        # if so, hash it as if it were a symlink to tar_target
+                        # if so, hash it as if it were the expected symlink
                         hash = git_object_hash("blob"; HashType) do io
-                            write(io, tar_target)
+                            write(io, path_info.link)
                         end
                     else
                         tar_type = sys_type # will cause a hash mismatch
@@ -322,10 +299,10 @@ end
 
 const EMPTY_HASHES = IdDict{DataType,String}()
 
-function empty_hash(tree_info::TreeInfo, HashType::DataType)
+function empty_hash(HashType::DataType)
     get!(EMPTY_HASHES, HashTypes) do
         empty_tree = mktempdir()
-        hash = git_tree_hash(tree_info, empty_tree; HashType)
+        hash = git_tree_hash(Dict{String,PathInfo}(), empty_tree; HashType)
         rm(empty_tree)
         return hash
     end
@@ -337,6 +314,17 @@ isexec(stat::Base.Filesystem.StatStruct) = (filemode(stat) & 0o100) ≠ 0
 
 is_tree_path(root::AbstractString, path::AbstractString) =
     startswith(normpath(path), normpath(root))
+
+function is_valid_tar_path(path::AbstractString)
+    path == "." && return true
+    isempty(path) && return false
+    parts = split(path, '/')
+    isempty(parts[end]) && pop!(parts)
+    for part in parts
+        part in ("", ".", "..") && return false
+    end
+    return true
+end
 
 function temp_path(path::AbstractString)
     temp = "$path.$(randstring(8)).tmp"
