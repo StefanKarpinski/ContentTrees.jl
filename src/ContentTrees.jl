@@ -10,72 +10,123 @@ import Tar
 
 ## main API functions ##
 
+mutable struct PathNode
+    type::Symbol
+    hash::String
+    link::String
+    contents::Dict{String,PathNode}
+    function PathNode(type::Symbol)
+        node = new(type)
+        if type == :directory
+            node.contents = Dict{String,PathNode}()
+        end
+        return node
+    end
+end
+
+# find a node in the tree, creating nodes as necessary
+function path_node!(tree::PathNode, path::AbstractString, type::Symbol)
+    node = tree
+    parts = split_tar_path(path)
+    for (i, name) in enumerate(parts)
+        if node.type ≠ :directory
+            here = join(parts[1:i-1], '/')
+            error("non-directory $(repr(here)) has contents: $(repr(path))")
+        end
+        if i < length(parts)
+            node = get!(node.contents, name) do
+                PathNode(:directory)
+            end
+        else
+            # overwrite whatever is already there
+            node = node.contents[name] = PathNode(type)
+        end
+    end
+    return node
+end
+
+function to_toml(node::PathNode)
+    node.type == :directory && return isempty(node.contents) ?
+        Dict{String,Any}("" => Dict("type" => string(node.type))) :
+        Dict{String,Any}(name => to_toml(child) for (name, child) in node.contents)
+    # non-directory
+    dict = Dict("type" => string(node.type))
+    if node.type == :symlink
+        dict["link"] = node.link
+    else
+        dict["hash"] = node.hash
+    end
+    return dict
+end
+
 function extract_tree(
     tarball::AbstractString,
-    hash::AbstractString,
     root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
 )
+    tree = PathNode(:directory)
     temp, can_symlink = temp_path(root)
 
     # extract tarball, recording contents & symlinks
-    paths = Dict{String,Dict{Symbol,String}}()
+    symlinks = Dict{String,String}()
     open(`gzcat $tarball`) do io
         Tar.extract(io, temp) do hdr
-            is_valid_tar_path(hdr.path) ||
-                error("invalid tarball path: $(repr(hdr.path))")
             executable = hdr.type == :file && (hdr.mode & 0o100) != 0
-            info = Dict(:type => executable ? "executable" : string(hdr.type))
+            node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
             if hdr.type == :symlink
-                info[:link] = hdr.link
+                node.link = symlinks[hdr.path] = hdr.link
+                return can_symlink
+            else
+                delete!(symlinks, hdr.path)
+                return true
             end
-            paths[hdr.path] = info
-            return hdr.type ≠ :symlink || can_symlink
         end
     end
 
     # make copies instead of symlinks on filesystems that can't symlink
     if !can_symlink
-        for (tar_path, info) in paths
-            paths[:type] == :symlink || continue
+        for (tar_path, link) in tree
             sys_path = joinpath(root, tar_path)
             target = joinpath(dirname(sys_path), link)
             if is_tree_path(root, target) && ispath(target)
-                cp(target, sys_path) # TODO: what about circularity?
+                # TODO: handle cycles?
+                cp(target, sys_path)
+            else
+                # TODO: warning/error?
             end
         end
     end
 
-    # populate all directories
-    paths["."] = Dict(:type => "directory", :hash => hash)
-    for path in keys(paths)
-        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
-            path = String(m.captures[1])
-            path in keys(paths) || continue
-            paths[path] = Dict(:type => "directory")
-        end
+    # compute hashes
+    compute_hash!(root, tree; HashType)
+
+    # verify the tree has the expected hash
+    if hash !== nothing && tree.hash != hash
+        msg  = "Tree hash mismatch!\n"
+        msg *= "  Expected: $hash\n"
+        msg *= "  Computed: $(tree.hash)"
+        # rm(temp, recursive=true) # TODO: uncomment
+        error(msg)
     end
 
-    # if tree_info path exists, save its git hash
+    # if tree_info path exists, remove it
     tree_info_file = joinpath(temp, ".tree_info.toml")
-    if haskey(paths, ".tree_info.toml")
-        paths[".tree_info.toml"][:hash] = git_hash(tree_info_file)
+    if haskey(tree.contents, ".tree_info.toml")
         @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
         rm(tree_info_file, recursive=true)
     end
 
-    # write the tree_info file
-    open(tree_info_file, write=true) do io
-        TOML.print(io, sorted=true, paths)
-    end
+    # construct tree_info
+    tree_info = to_toml(tree)
+    tree_info[""] = Dict(
+        "algo" => "git-tree-sha1",
+        "hash" => tree.hash,
+    )
 
-    # verify the tree
-    hash′ = git_hash(temp)
-    if hash′ != hash
-        msg  = "Tree hash mismatch!\n"
-        msg *= "  Expected SHA1: $hash\n"
-        msg *= "  Computed SHA1: $hash′"
-        # rm(temp, recursive=true)
-        error(msg)
+    # write tree_info to file
+    open(tree_info_file, write=true) do io
+        TOML.print(io, sorted=true, tree_info)
     end
 
     # move temp dir to right place
@@ -85,13 +136,6 @@ function extract_tree(
 end
 
 ## type for representing `.tree_info.toml` data ##
-
-mutable struct PathInfo
-    type::Symbol
-    link::String
-    hash::String
-    PathInfo(type::Union{Symbol,AbstractString}) = new(Symbol(type))
-end
 
 function tree_info(root::AbstractString)
     file = joinpath(root, ".tree_info.toml")
@@ -109,6 +153,7 @@ function tree_info(root::AbstractString)
     paths = Dict{String,PathInfo}()
     for (path, info) in data
         # validate the path itself
+        # TODO: validate path (check non-empty, no '/' and not '.' or '..')
         is_valid_tar_path(path) ||
             error("contains invalid path: $(repr(path)) in $file")
         # get the path type
@@ -165,6 +210,44 @@ function tree_info(root::AbstractString)
     return paths
 end
 
+## computing the hashes ##
+
+function compute_hash!(
+    path::AbstractString,
+    node::PathNode;
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    if node.type == :directory
+        nodes = Pair{String,PathNode}[
+            name => child for (name, child) in node.contents
+        ]
+        let by((name, child)) = child.type == :directory ? "$name/" : name
+            sort!(nodes; by)
+        end
+        for (name, child) in nodes
+            compute_hash!(joinpath(path, name), child; HashType)
+        end
+        node.hash = git_object_hash("tree"; HashType) do io
+            for (name, child) in nodes
+                mode = child.type == :directory  ?  "40000" :
+                       child.type == :executable ? "100755" :
+                       child.type == :file       ? "100644" :
+                       child.type == :symlink    ? "120000" : @assert false
+                print(io, mode, ' ', name, '\0')
+                write(io, hex2bytes(child.hash))
+            end
+        end
+    elseif node.type == :symlink
+        node.hash = git_object_hash("blob"; HashType) do io
+            write(io, node.link)
+        end
+    else # file/executable
+        node.hash = git_object_hash("blob"; HashType) do io
+            write(io, read(path)) # TODO: more efficient sendfile
+        end
+    end
+end
+
 ## git hashing ##
 
 function git_hash(path::AbstractString; HashType::DataType = SHA.SHA1_CTX)
@@ -208,7 +291,7 @@ const REPLACEMENT_TYPES = Dict(
 )
 
 function git_tree_hash(
-    paths::Dict{String,PathInfo},
+    paths::Dict{String,PathNode},
     sys_path::AbstractString,
     tar_path::AbstractString = "";
     HashType::DataType = SHA.SHA1_CTX,
@@ -315,15 +398,17 @@ isexec(stat::Base.Filesystem.StatStruct) = (filemode(stat) & 0o100) ≠ 0
 is_tree_path(root::AbstractString, path::AbstractString) =
     startswith(normpath(path), normpath(root))
 
-function is_valid_tar_path(path::AbstractString)
-    path == "." && return true
-    isempty(path) && return false
-    parts = split(path, '/')
+function split_tar_path(path::AbstractString)
+    path == "." && return String[]
+    isempty(path) &&
+        error("invalid empty tar path")
+    parts = split(path, r"/+")
     isempty(parts[end]) && pop!(parts)
     for part in parts
-        part in ("", ".", "..") && return false
+        part in (".", "..") &&
+            error("invalid tar path contains $(repr(part)): $path")
     end
-    return true
+    return parts
 end
 
 function temp_path(path::AbstractString)
