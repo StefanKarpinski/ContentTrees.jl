@@ -14,6 +14,7 @@ mutable struct PathNode
     type::Symbol
     hash::String
     link::String
+    target::PathNode
     contents::Dict{String,PathNode}
     function PathNode(type::Symbol)
         node = new(type)
@@ -45,14 +46,24 @@ function path_node!(tree::PathNode, path::AbstractString, type::Symbol)
     return node
 end
 
+const METADATA_KEYS = split("type link target hash")
+
+name_to_key(name::AbstractString)::String =
+    name in METADATA_KEYS ? "./$name" : name
+key_to_name(key::AbstractString)::String =
+    startswith("./") ? chop(key, head=2, tail=0) : key
+
 function to_toml(node::PathNode)
     node.type == :directory && return isempty(node.contents) ?
-        Dict{String,Any}("" => Dict("type" => string(node.type))) :
-        Dict{String,Any}(name => to_toml(child) for (name, child) in node.contents)
+        Dict("type" => string(node.type)) :
+        Dict{String,Any}(name_to_key(n) => to_toml(c) for (n, c) in node.contents)
     # non-directory
     dict = Dict("type" => string(node.type))
     if node.type == :symlink
         dict["link"] = node.link
+        if isdefined(node, :target)
+            dict["target"] = node.target.hash
+        end
     else
         dict["hash"] = node.hash
     end
@@ -69,34 +80,17 @@ function extract_tree(
     temp, can_symlink = temp_path(root)
 
     # extract tarball, recording contents & symlinks
-    symlinks = Dict{String,String}()
     open(`gzcat $tarball`) do io
         Tar.extract(io, temp) do hdr
             executable = hdr.type == :file && (hdr.mode & 0o100) != 0
             node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
-            if hdr.type == :symlink
-                node.link = symlinks[hdr.path] = hdr.link
-                return can_symlink
-            else
-                delete!(symlinks, hdr.path)
-                return true
-            end
+            hdr.type == :symlink && (node.link = hdr.link)
+            return can_symlink || hdr.type != :symlink
         end
     end
 
     # make copies instead of symlinks on filesystems that can't symlink
-    if !can_symlink
-        for (tar_path, link) in tree
-            sys_path = joinpath(root, tar_path)
-            target = joinpath(dirname(sys_path), link)
-            if is_tree_path(root, target) && ispath(target)
-                # TODO: handle cycles?
-                cp(target, sys_path)
-            else
-                # TODO: warning/error?
-            end
-        end
-    end
+    # TODO
 
     # compute hashes
     compute_hash!(root, tree; HashType)
@@ -117,14 +111,9 @@ function extract_tree(
         rm(tree_info_file, recursive=true)
     end
 
-    # construct tree_info
+    # construct & write tree_info to file
     tree_info = to_toml(tree)
-    tree_info[""] = Dict(
-        "algo" => "git-tree-sha1",
-        "hash" => tree.hash,
-    )
-
-    # write tree_info to file
+    tree_info["hash"] = tree.hash
     open(tree_info_file, write=true) do io
         TOML.print(io, sorted=true, tree_info)
     end
