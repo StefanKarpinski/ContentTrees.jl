@@ -85,6 +85,25 @@ function resolve_symlinks!(node::PathNode)
     end
 end
 
+function copy_symlinks(root::AbstractString, node::PathNode)
+    if node.type == :symlink
+        if isdefined(node, :target)
+            link = node_path(root, node)
+            if isanscestor(node.target, node)
+                @warn("self copy required to simulate simlink, skipping",
+                    path=link, link=node.link)
+            else
+                target = node_path(root, node.target)
+                cp(target, link)
+            end
+        end
+    elseif node.type == :directory
+        for child in values(node.children)
+            copy_symlinks(root, child)
+        end
+    end
+end
+
 function symlink_target(node::PathNode, path::AbstractString)
     startswith(path, '/') ? nothing : symlink_target(node, split(path, r"/+"))
 end
@@ -104,6 +123,23 @@ function symlink_target(node::PathNode, parts::Vector{<:AbstractString}, i::Int=
     end
 end
 
+function node_path(root::AbstractString, node::PathNode)
+    isdefined(node, :parent) || return root
+    for (name, sibling) in node.parent.children
+        sibling === node || continue
+        return joinpath(node_path(root, node.parent), name)
+    end
+    error("internal error: node doesn't appear in parent's children")
+end
+
+function isanscestor(a::PathNode, b::PathNode)
+    while true
+        a === b && return true
+        isdefined(b, :parent) || return false
+        b = b.parent
+    end
+end
+
 const METADATA_KEYS = split("type link target hash")
 
 name_to_key(name::AbstractString)::String =
@@ -115,6 +151,7 @@ function to_toml(node::PathNode)
     dict = Dict{String,Any}()
     if node.type == :directory
         isdefined(node, :parent) || (dict["hash"] = node.hash)
+        isempty(node.children) && (dict["type"] = node.type)
         for (name, child) in node.children
             dict[name_to_key(name)] = to_toml(child)
         end
@@ -122,8 +159,8 @@ function to_toml(node::PathNode)
         dict["type"] = node.type
         if node.type == :symlink
             dict["link"] = node.link
-            if isdefined(node, :target)
-                dict["target"] = node.target.hash
+            if isdefined(node, :target) && !isanscestor(node.target, node)
+                dict["copy"] = node.target.hash
             end
         else
             dict["hash"] = node.hash
@@ -138,8 +175,13 @@ function extract_tree(
     hash::Union{AbstractString, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
 )
+    # remove destination first if it exists
+    ispath(root) && @warn "path already exists, replacing" path=root
+
+    # create tree info structure
     tree = PathNode(:directory)
     temp, can_symlink = temp_path(root)
+    can_symlink = false
 
     # extract tarball, recording contents
     open(`gzcat $tarball`) do io
@@ -151,10 +193,10 @@ function extract_tree(
         end
     end
     resolve_symlinks!(tree)
-    compute_hashes!(root, tree; HashType)
+    compute_hashes!(temp, tree; HashType)
 
     # make copies instead of symlinks on filesystems that can't symlink
-    # TODO: make copies instead of symlinks
+    !can_symlink && copy_symlinks(temp, tree)
 
     # verify the tree has the expected hash
     if hash !== nothing && tree.hash != hash
@@ -179,7 +221,6 @@ function extract_tree(
     end
 
     # move temp dir to right place
-    ispath(root) && @warn "path already exists, replacing" path=root
     mv(temp, root, force=true)
     return
 end
