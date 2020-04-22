@@ -112,18 +112,22 @@ key_to_name(key::AbstractString)::String =
     startswith("./") ? chop(key, head=2, tail=0) : key
 
 function to_toml(node::PathNode)
-    node.type == :directory && return isempty(node.children) ?
-        Dict("type" => string(node.type)) :
-        Dict{String,Any}(name_to_key(n) => to_toml(c) for (n, c) in node.children)
-    # non-directory
-    dict = Dict("type" => string(node.type))
-    if node.type == :symlink
-        dict["link"] = node.link
-        if isdefined(node, :target)
-            dict["target"] = node.target.hash
+    dict = Dict{String,Any}()
+    if node.type == :directory
+        isdefined(node, :parent) || (dict["hash"] = node.hash)
+        for (name, child) in node.children
+            dict[name_to_key(name)] = to_toml(child)
         end
     else
-        dict["hash"] = node.hash
+        dict["type"] = node.type
+        if node.type == :symlink
+            dict["link"] = node.link
+            if isdefined(node, :target)
+                dict["target"] = node.target.hash
+            end
+        else
+            dict["hash"] = node.hash
+        end
     end
     return dict
 end
@@ -170,7 +174,6 @@ function extract_tree(
 
     # construct & write tree_info to file
     tree_info = to_toml(tree)
-    tree_info["hash"] = tree.hash
     open(tree_info_file, write=true) do io
         TOML.print(io, sorted=true, tree_info)
     end
