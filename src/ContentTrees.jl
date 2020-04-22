@@ -132,13 +132,8 @@ function node_path(root::AbstractString, node::PathNode)
     error("internal error: node doesn't appear in parent's children")
 end
 
-function isanscestor(a::PathNode, b::PathNode)
-    while true
-        a === b && return true
-        isdefined(b, :parent) || return false
-        b = b.parent
-    end
-end
+isanscestor(a::PathNode, b::PathNode) =
+    a === b || isdefined(b, :parent) && isanscestor(a, b.parent)
 
 const METADATA_KEYS = split("type link target hash")
 
@@ -181,7 +176,6 @@ function extract_tree(
     # create tree info structure
     tree = PathNode(:directory)
     temp, can_symlink = temp_path(root)
-    can_symlink = false
 
     # extract tarball, recording contents
     open(`gzcat $tarball`) do io
