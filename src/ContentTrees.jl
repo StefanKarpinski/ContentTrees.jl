@@ -32,6 +32,7 @@ function PathNode(type::Symbol, parent::PathNode)
     return node
 end
 
+# only for debugging, but quite useful
 function Base.show(io::IO, node::PathNode)
     print(io, "PathNode(")
     show(io, node.type)
@@ -136,24 +137,20 @@ function extract_tree(
     tree = PathNode(:directory)
     temp, can_symlink = temp_path(root)
 
-    # extract tarball, recording contents & symlinks
+    # extract tarball, recording contents
     open(`gzcat $tarball`) do io
         Tar.extract(io, temp) do hdr
             executable = hdr.type == :file && (hdr.mode & 0o100) != 0
             node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
             hdr.type == :symlink && (node.link = hdr.link)
-            return can_symlink || hdr.type != :symlink
+            hdr.type != :symlink || can_symlink
         end
     end
-
-    # find target nodes for in-tree symlinks
     resolve_symlinks!(tree)
+    compute_hashes!(root, tree; HashType)
 
     # make copies instead of symlinks on filesystems that can't symlink
-    # TODO
-
-    # compute hashes
-    compute_hash!(root, tree; HashType)
+    # TODO: make copies instead of symlinks
 
     # verify the tree has the expected hash
     if hash !== nothing && tree.hash != hash
@@ -166,7 +163,7 @@ function extract_tree(
 
     # if tree_info path exists, remove it
     tree_info_file = joinpath(temp, ".tree_info.toml")
-    if haskey(tree.contents, ".tree_info.toml")
+    if haskey(tree.children, ".tree_info.toml")
         @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
         rm(tree_info_file, recursive=true)
     end
@@ -261,7 +258,7 @@ end
 
 ## computing the hashes ##
 
-function compute_hash!(
+function compute_hashes!(
     path::AbstractString,
     node::PathNode;
     HashType::DataType = SHA.SHA1_CTX,
@@ -274,7 +271,7 @@ function compute_hash!(
             sort!(nodes; by)
         end
         for (name, child) in nodes
-            compute_hash!(joinpath(path, name), child; HashType)
+            compute_hashes!(joinpath(path, name), child; HashType)
         end
         node.hash = git_object_hash("tree"; HashType) do io
             for (name, child) in nodes
