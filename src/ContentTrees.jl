@@ -87,15 +87,18 @@ end
 
 function copy_symlinks(root::AbstractString, node::PathNode)
     if node.type == :symlink
+        link = node_path(root, node)
         if isdefined(node, :target)
-            link = node_path(root, node)
+            # TODO: what if node.target is also a symlink?
             if isanscestor(node.target, node)
-                @warn("self copy required to simulate simlink, skipping",
+                @warn("skipping copy of symlink to parent directory",
                     path=link, link=node.link)
             else
-                target = node_path(root, node.target)
-                cp(target, link)
+                cp(node_path(root, node.target), link)
             end
+        else
+            @warn("skipping copy of broken or external symlink",
+                path=link, link=node.link)
         end
     elseif node.type == :directory
         for child in values(node.children)
@@ -155,6 +158,7 @@ function to_toml(node::PathNode)
         if node.type == :symlink
             dict["link"] = node.link
             if isdefined(node, :target) && !isanscestor(node.target, node)
+                # TODO: what if node.target is also a symlink?
                 dict["copy"] = node.target.hash
             end
         else
