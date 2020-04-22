@@ -15,14 +15,43 @@ mutable struct PathNode
     hash::String
     link::String
     target::PathNode
-    contents::Dict{String,PathNode}
+    parent::PathNode
+    children::Dict{String,PathNode}
     function PathNode(type::Symbol)
         node = new(type)
         if type == :directory
-            node.contents = Dict{String,PathNode}()
+            node.children = Dict{String,PathNode}()
         end
         return node
     end
+end
+
+function PathNode(type::Symbol, parent::PathNode)
+    node = PathNode(type)
+    node.parent = parent
+    return node
+end
+
+function Base.show(io::IO, node::PathNode)
+    print(io, "PathNode(")
+    show(io, node.type)
+    for field in (:hash, :link)
+        if isdefined(node, field)
+            print(io, ", $field = ")
+            show(io, getfield(node, field))
+        end
+    end
+    if isdefined(node, :children)
+        print(io, ", children = {")
+        for (i, (name, child)) in enumerate(node.children)
+            i == 1 || print(io, ", ")
+            show(io, name)
+            print(io, " = ")
+            show(io, child)
+        end
+        print(io, "}")
+    end
+    print(io, ")")
 end
 
 # find a node in the tree, creating nodes as necessary
@@ -35,15 +64,43 @@ function path_node!(tree::PathNode, path::AbstractString, type::Symbol)
             error("non-directory $(repr(here)) has contents: $(repr(path))")
         end
         if i < length(parts)
-            node = get!(node.contents, name) do
-                PathNode(:directory)
+            node = get!(node.children, name) do
+                PathNode(:directory, node)
             end
         else
             # overwrite whatever is already there
-            node = node.contents[name] = PathNode(type)
+            node = node.children[name] = PathNode(type, node)
         end
     end
     return node
+end
+
+function resolve_symlinks!(node::PathNode)
+    if node.type == :symlink
+        target = symlink_target(node.parent, node.link)
+        target !== nothing && (node.target = target)
+    elseif node.type == :directory
+        foreach(resolve_symlinks!, values(node.children))
+    end
+end
+
+function symlink_target(node::PathNode, path::AbstractString)
+    startswith(path, '/') ? nothing : symlink_target(node, split(path, r"/+"))
+end
+
+function symlink_target(node::PathNode, parts::Vector{<:AbstractString}, i::Int=1)
+    return if i > length(parts)
+        node
+    elseif parts[i] == "."
+        symlink_target(node, parts, i+1)
+    elseif parts[i] == ".."
+        isdefined(node, :parent) ? symlink_target(node.parent, parts, i+1) : nothing
+    elseif node.type == :directory
+        child = get(node.children, parts[i], nothing)
+        child !== nothing ? symlink_target(child, parts, i+1) : nothing
+    else
+        nothing
+    end
 end
 
 const METADATA_KEYS = split("type link target hash")
@@ -54,9 +111,9 @@ key_to_name(key::AbstractString)::String =
     startswith("./") ? chop(key, head=2, tail=0) : key
 
 function to_toml(node::PathNode)
-    node.type == :directory && return isempty(node.contents) ?
+    node.type == :directory && return isempty(node.children) ?
         Dict("type" => string(node.type)) :
-        Dict{String,Any}(name_to_key(n) => to_toml(c) for (n, c) in node.contents)
+        Dict{String,Any}(name_to_key(n) => to_toml(c) for (n, c) in node.children)
     # non-directory
     dict = Dict("type" => string(node.type))
     if node.type == :symlink
@@ -88,6 +145,9 @@ function extract_tree(
             return can_symlink || hdr.type != :symlink
         end
     end
+
+    # find target nodes for in-tree symlinks
+    resolve_symlinks!(tree)
 
     # make copies instead of symlinks on filesystems that can't symlink
     # TODO
@@ -208,7 +268,7 @@ function compute_hash!(
 )
     if node.type == :directory
         nodes = Pair{String,PathNode}[
-            name => child for (name, child) in node.contents
+            name => child for (name, child) in node.children
         ]
         let by((name, child)) = child.type == :directory ? "$name/" : name
             sort!(nodes; by)
