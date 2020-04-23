@@ -170,8 +170,10 @@ key_to_name(key::AbstractString)::String =
 function to_toml(node::PathNode)
     dict = Dict{String,Any}()
     if node.type == :directory
-        isdefined(node, :parent) || (dict["hash"] = node.hash)
-        isempty(node.children) && (dict["type"] = node.type)
+        if !isdefined(node, :parent) || isempty(node.children)
+            dict["hash"] = node.hash
+            dict["type"] = node.type
+        end
         for (name, child) in node.children
             dict[name_to_key(name)] = to_toml(child)
         end
