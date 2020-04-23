@@ -8,8 +8,6 @@ import Random: randstring
 import SHA
 import Tar
 
-## main API functions ##
-
 mutable struct PathNode
     type::Symbol
     hash::String
@@ -32,7 +30,6 @@ function PathNode(type::Symbol, parent::PathNode)
     return node
 end
 
-# only for debugging, but quite useful
 function Base.show(io::IO, node::PathNode)
     print(io, "PathNode(")
     show(io, node.type)
@@ -55,7 +52,6 @@ function Base.show(io::IO, node::PathNode)
     print(io, ")")
 end
 
-# find a node in the tree, creating nodes as necessary
 function path_node!(tree::PathNode, path::AbstractString, type::Symbol)
     node = tree
     parts = split_tar_path(path)
@@ -95,6 +91,42 @@ function follow_symlinks!(node::PathNode)
         end
     elseif node.type == :directory
         foreach(follow_symlinks!, values(node.children))
+    end
+end
+
+function compute_hashes!(
+    path::AbstractString,
+    node::PathNode;
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    if node.type == :directory
+        nodes = Pair{String,PathNode}[
+            name => child for (name, child) in node.children
+        ]
+        let by((name, child)) = child.type == :directory ? "$name/" : name
+            sort!(nodes; by)
+        end
+        for (name, child) in nodes
+            compute_hashes!(joinpath(path, name), child; HashType)
+        end
+        node.hash = git_object_hash("tree"; HashType) do io
+            for (name, child) in nodes
+                mode = child.type == :directory  ?  "40000" :
+                       child.type == :executable ? "100755" :
+                       child.type == :file       ? "100644" :
+                       child.type == :symlink    ? "120000" : @assert false
+                print(io, mode, ' ', name, '\0')
+                write(io, hex2bytes(child.hash))
+            end
+        end
+    elseif node.type == :symlink
+        node.hash = git_object_hash("blob"; HashType) do io
+            write(io, node.link)
+        end
+    else # file/executable
+        node.hash = git_object_hash("blob"; HashType) do io
+            write(io, read(path)) # TODO: more efficient sendfile
+        end
     end
 end
 
@@ -317,44 +349,6 @@ function tree_info(root::AbstractString)
     end
 
     return paths
-end
-
-## computing the hashes ##
-
-function compute_hashes!(
-    path::AbstractString,
-    node::PathNode;
-    HashType::DataType = SHA.SHA1_CTX,
-)
-    if node.type == :directory
-        nodes = Pair{String,PathNode}[
-            name => child for (name, child) in node.children
-        ]
-        let by((name, child)) = child.type == :directory ? "$name/" : name
-            sort!(nodes; by)
-        end
-        for (name, child) in nodes
-            compute_hashes!(joinpath(path, name), child; HashType)
-        end
-        node.hash = git_object_hash("tree"; HashType) do io
-            for (name, child) in nodes
-                mode = child.type == :directory  ?  "40000" :
-                       child.type == :executable ? "100755" :
-                       child.type == :file       ? "100644" :
-                       child.type == :symlink    ? "120000" : @assert false
-                print(io, mode, ' ', name, '\0')
-                write(io, hex2bytes(child.hash))
-            end
-        end
-    elseif node.type == :symlink
-        node.hash = git_object_hash("blob"; HashType) do io
-            write(io, node.link)
-        end
-    else # file/executable
-        node.hash = git_object_hash("blob"; HashType) do io
-            write(io, read(path)) # TODO: more efficient sendfile
-        end
-    end
 end
 
 ## git hashing ##
