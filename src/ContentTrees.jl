@@ -179,9 +179,6 @@ function to_toml(node::PathNode)
         dict["type"] = node.type
         if node.type == :symlink
             dict["link"] = node.link
-            if node.copy !== nothing
-                dict["copy"] = node.copy.hash
-            end
         else
             dict["hash"] = node.hash
         end
