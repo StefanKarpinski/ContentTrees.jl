@@ -94,6 +94,14 @@ function follow_symlinks!(node::PathNode)
     end
 end
 
+function prune_empty_trees!(node::PathNode)
+    node.type != :directory && return false
+    for (name, child) in collect(node.children)
+        prune_empty_trees!(child) && pop!(node.children, name)
+    end
+    return isempty(node.children)
+end
+
 function compute_hashes!(
     path::AbstractString,
     node::PathNode;
@@ -251,11 +259,16 @@ function extract_tree(
 
     # verify the tree has the expected hash
     if hash !== nothing && tree.hash != hash
-        msg  = "Tree hash mismatch!\n"
-        msg *= "  Expected: $hash\n"
-        msg *= "  Computed: $(tree.hash)"
-        # rm(temp, recursive=true) # TODO: uncomment
-        error(msg)
+        tree_hash = tree.hash
+        prune_empty_trees!(tree)
+        compute_hashes!(temp, tree; HashType)
+        if tree.hash != hash
+            msg  = "Tree hash mismatch!\n"
+            msg *= "  Expected: $hash\n"
+            msg *= "  Computed: $tree_hash"
+            rm(temp, recursive=true)
+            error(msg)
+        end
     end
 
     # if tree_info path exists, remove it
