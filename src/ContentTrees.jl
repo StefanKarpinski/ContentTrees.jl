@@ -14,7 +14,7 @@ mutable struct PathNode
     type::Symbol
     hash::String
     link::String
-    target::PathNode
+    copy::Union{PathNode,Nothing}
     parent::PathNode
     children::Dict{String,PathNode}
     function PathNode(type::Symbol)
@@ -78,27 +78,34 @@ end
 
 function resolve_symlinks!(node::PathNode)
     if node.type == :symlink
-        target = symlink_target(node.parent, node.link)
-        target !== nothing && (node.target = target)
+        node.copy = symlink_target(node.parent, node.link)
     elseif node.type == :directory
         foreach(resolve_symlinks!, values(node.children))
+    end
+    if !isdefined(node, :parent)
+        follow_symlinks!(node::PathNode)
+    end
+end
+
+function follow_symlinks!(node::PathNode)
+    if node.type == :symlink && node.copy !== nothing
+        node.copy = follow_symlinks(node.copy, [node])
+        if node.copy !== nothing && isanscestor(node.copy, node)
+            node.copy = nothing
+        end
+    elseif node.type == :directory
+        foreach(follow_symlinks!, values(node.children))
     end
 end
 
 function copy_symlinks(root::AbstractString, node::PathNode)
     if node.type == :symlink
         link = node_path(root, node)
-        if isdefined(node, :target)
-            # TODO: what if node.target is also a symlink?
-            if isanscestor(node.target, node)
-                @warn("skipping copy of symlink to parent directory",
-                    path=link, link=node.link)
-            else
-                cp(node_path(root, node.target), link)
-            end
-        else
-            @warn("skipping copy of broken or external symlink",
+        if node.copy === nothing
+            @warn("skipping copy of broken, circular or external symlink",
                 path=link, link=node.link)
+        else
+            cp(node_path(root, node.copy), link)
         end
     elseif node.type == :directory
         for child in values(node.children)
@@ -107,9 +114,8 @@ function copy_symlinks(root::AbstractString, node::PathNode)
     end
 end
 
-function symlink_target(node::PathNode, path::AbstractString)
+symlink_target(node::PathNode, path::AbstractString) =
     startswith(path, '/') ? nothing : symlink_target(node, split(path, r"/+"))
-end
 
 function symlink_target(node::PathNode, parts::Vector{<:AbstractString}, i::Int=1)
     return if i > length(parts)
@@ -124,6 +130,12 @@ function symlink_target(node::PathNode, parts::Vector{<:AbstractString}, i::Int=
     else
         nothing
     end
+end
+
+function follow_symlinks(node::PathNode, seen::Vector{PathNode})
+    node.type != :symlink && return node
+    (node ∈ seen || node.copy === nothing) && return nothing
+    return follow_symlinks(node.copy, push!(seen, node))
 end
 
 function node_path(root::AbstractString, node::PathNode)
@@ -157,9 +169,8 @@ function to_toml(node::PathNode)
         dict["type"] = node.type
         if node.type == :symlink
             dict["link"] = node.link
-            if isdefined(node, :target) && !isanscestor(node.target, node)
-                # TODO: what if node.target is also a symlink?
-                dict["copy"] = node.target.hash
+            if node.copy !== nothing
+                dict["copy"] = node.copy.hash
             end
         else
             dict["hash"] = node.hash
@@ -171,7 +182,7 @@ end
 function extract_tree(
     tarball::AbstractString,
     root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing,
+    hash::Union{AbstractString, Nothing} = nothing;
     HashType::DataType = SHA.SHA1_CTX,
 )
     # remove destination first if it exists
