@@ -142,11 +142,17 @@ function follow_symlinks(node::PathNode, seen::Vector{PathNode})
     return follow_symlinks(node.copy, push!(seen, node))
 end
 
-function node_path(root::AbstractString, node::PathNode)
+node_path(node::PathNode) = node_path(nothing, node)
+
+function node_path(root::Union{AbstractString, Nothing}, node::PathNode)
     isdefined(node, :parent) || return root
     for (name, sibling) in node.parent.children
-        sibling === node || continue
-        return joinpath(node_path(root, node.parent), name)
+        sibling === node && return if root === nothing
+            parent = node_path(node.parent)
+            parent === nothing ? name : "$parent/$name"
+        else
+            joinpath(node_path(root, node.parent), name)
+        end
     end
     error("internal error: node doesn't appear in parent's children")
 end
