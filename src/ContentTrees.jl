@@ -187,6 +187,7 @@ function extract_tree(
     tarball::AbstractString,
     root::AbstractString,
     hash::Union{AbstractString, Nothing} = nothing;
+    can_symlink::Union{Bool, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
 )
     # remove destination first if it exists
@@ -194,7 +195,7 @@ function extract_tree(
 
     # create tree info structure
     tree = PathNode(:directory)
-    temp, can_symlink = temp_path(root)
+    temp, can_symlink = temp_path(root, can_symlink)
 
     # extract tarball, recording contents
     open(`gzcat $tarball`) do io
@@ -514,22 +515,24 @@ function split_tar_path(path::AbstractString)
     return parts
 end
 
-function temp_path(path::AbstractString)
+function temp_path(path::AbstractString, can_symlink::Union{Bool, Nothing})
     temp = "$path.$(randstring(8)).tmp"
     mkdir(temp)
     Base.Filesystem.temp_cleanup_later(temp)
-    link_path = joinpath(temp, "link")
-    loglevel = Logging.min_enabled_level(Logging.current_logger())
-    can_symlink = try
-        Logging.disable_logging(Logging.Warn)
-        symlink("target", link_path)
-        true
-    catch err
-        err isa Base.IOError || rethrow()
-        false
-    finally
-        Logging.disable_logging(loglevel-1)
-        rm(link_path; force=true)
+    if can_symlink === nothing
+        link_path = joinpath(temp, "link")
+        loglevel = Logging.min_enabled_level(Logging.current_logger())
+        can_symlink = try
+            Logging.disable_logging(Logging.Warn)
+            symlink("target", link_path)
+            true
+        catch err
+            err isa Base.IOError || rethrow()
+            false
+        finally
+            Logging.disable_logging(loglevel-1)
+            rm(link_path; force=true)
+        end
     end
     return temp, can_symlink
 end
