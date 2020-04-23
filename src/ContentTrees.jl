@@ -212,7 +212,7 @@ function extract_tree(
     resolve_symlinks!(tree)
     compute_hashes!(temp, tree; HashType)
 
-    # make copies instead of symlinks on filesystems that can't symlink
+    # simulate simlinks with copies
     !can_symlink && copy_symlinks(temp, tree)
 
     # verify the tree has the expected hash
@@ -335,9 +335,7 @@ function compute_hashes!(
             compute_hashes!(joinpath(path, name), child; HashType)
         end
         node.hash = git_object_hash("tree"; HashType) do io
-            empty_tree = empty_hash(HashType)
             for (name, child) in nodes
-                child.type == :directory && child.hash == empty_tree && continue
                 mode = child.type == :directory  ?  "40000" :
                        child.type == :executable ? "100755" :
                        child.type == :file       ? "100644" :
