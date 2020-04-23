@@ -332,7 +332,9 @@ function compute_hashes!(
             compute_hashes!(joinpath(path, name), child; HashType)
         end
         node.hash = git_object_hash("tree"; HashType) do io
+            empty_tree = empty_hash(HashType)
             for (name, child) in nodes
+                child.type == :directory && child.hash == empty_tree && continue
                 mode = child.type == :directory  ?  "40000" :
                        child.type == :executable ? "100755" :
                        child.type == :file       ? "100644" :
@@ -487,9 +489,9 @@ end
 const EMPTY_HASHES = IdDict{DataType,String}()
 
 function empty_hash(HashType::DataType)
-    get!(EMPTY_HASHES, HashTypes) do
+    get!(EMPTY_HASHES, HashType) do
         empty_tree = mktempdir()
-        hash = git_tree_hash(Dict{String,PathInfo}(), empty_tree; HashType)
+        hash = git_tree_hash(Dict{String,PathNode}(), empty_tree; HashType)
         rm(empty_tree)
         return hash
     end
