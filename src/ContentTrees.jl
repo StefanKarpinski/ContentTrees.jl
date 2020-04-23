@@ -118,17 +118,21 @@ symlink_target(node::PathNode, path::AbstractString) =
     startswith(path, '/') ? nothing : symlink_target(node, split(path, r"/+"))
 
 function symlink_target(node::PathNode, parts::Vector{<:AbstractString}, i::Int=1)
-    return if i > length(parts)
+    if i > length(parts)
         node
-    elseif parts[i] == "."
-        symlink_target(node, parts, i+1)
+    elseif parts[i] in ("", ".")
+        if node.type == :directory
+            symlink_target(node, parts, i+1)
+        end
     elseif parts[i] == ".."
-        isdefined(node, :parent) ? symlink_target(node.parent, parts, i+1) : nothing
+       if node.type == :directory && isdefined(node, :parent)
+            symlink_target(node.parent, parts, i+1)
+        end
     elseif node.type == :directory
         child = get(node.children, parts[i], nothing)
-        child !== nothing ? symlink_target(child, parts, i+1) : nothing
-    else
-        nothing
+        if child !== nothing
+            symlink_target(child, parts, i+1)
+        end
     end
 end
 
