@@ -8,6 +8,144 @@ import Random: randstring
 import SHA
 import Tar
 
+## main API ##
+
+function extract_tree(
+    tarball::AbstractString,
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    can_symlink::Union{Bool, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    # remove destination first if it exists
+    ispath(root) && @warn "path already exists, replacing" path=root
+
+    # create tree info structure
+    tree = PathNode(:directory)
+    temp, can_symlink = temp_path(root, can_symlink)
+
+    # extract tarball, recording contents
+    open(`gzcat $tarball`) do io
+        Tar.extract(io, temp) do hdr
+            executable = hdr.type == :file && (hdr.mode & 0o100) != 0
+            node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
+            hdr.type == :symlink && (node.link = hdr.link)
+            hdr.type != :symlink || can_symlink
+        end
+    end
+    resolve_symlinks!(tree)
+    compute_hashes!(temp, tree; HashType)
+
+    # simulate simlinks with copies
+    !can_symlink && copy_symlinks(temp, tree)
+
+    # verify the tree has the expected hash
+    if hash !== nothing && tree.hash != hash
+        tree_hash = tree.hash
+        prune_empty_trees!(tree)
+        compute_hashes!(temp, tree; HashType)
+        if tree.hash != hash
+            msg  = "Tree hash mismatch!\n"
+            msg *= "  Expected: $hash\n"
+            msg *= "  Computed: $tree_hash"
+            rm(temp, recursive=true)
+            error(msg)
+        end
+    end
+
+    # if tree_info path exists, remove it
+    tree_info_file = joinpath(temp, ".tree_info.toml")
+    if haskey(tree.children, ".tree_info.toml")
+        @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
+        rm(tree_info_file, recursive=true)
+    end
+
+    # construct & write tree_info to file
+    tree_info = to_toml(tree)
+    open(tree_info_file, write=true) do io
+        TOML.print(io, sorted=true, tree_info)
+    end
+
+    # move temp dir to right place
+    mv(temp, root, force=true)
+    return
+end
+
+## loading and validating `.tree_info.toml` as PathNode tree ##
+
+function tree_info(root::AbstractString)
+    # look for the `.tree_info.toml` file
+    file = joinpath(root, ".tree_info.toml")
+    isdir(root) ||
+        error("no directory found at $root")
+    ispath(file) ||
+        error("no tree info file found at $file")
+
+    # load data & convert to PathNode tree
+    data = TOML.parsefile(file)
+    tree = from_toml(data)
+
+    for (path, info) in data
+        # validate the path itself
+        # TODO: validate path (check non-empty, no '/' and not '.' or '..')
+        is_valid_tar_path(path) ||
+            error("contains invalid path: $(repr(path)) in $file")
+        # get the path type
+        haskey(info, "type") ||
+            error("missing `type` field for $path in $file")
+        type = info["type"]
+        type in ("symlink", "directory", "executable", "file") ||
+            error("invalid `type` field, $(repr(type)), for $path in $file")
+        type = Symbol(type)
+        path_info = PathInfo(type)
+        # ensure link field iff symlink
+        if type == :symlink
+            haskey(info, "link") ||
+                error("missing `link` field for symlink $path in $file")
+            link = info["link"]
+            link isa AbstractString ||
+                error("invalid `link` field, $(repr(link)), for $path in $file")
+            path_info.link = link
+        else
+            haskey(info, "link") &&
+                error("`link` field present for non-symlink $path in $file")
+        end
+        # validate hash field if there is one
+        if haskey(info, "hash")
+            hash = info["hash"]
+            hash isa AbstractString ||
+                error("invalid `hash` value, $(repr(hash)), for $path in $file")
+            hash = try normalize_hash(hash)
+            catch err
+                err isa ArgumentError || rethrow()
+                error("invalid `hash`, $(repr(hash)), for $path in $file:\n$(err.msg)")
+            end
+            path_info.hash = hash
+        end
+        # `.tree_info.toml` must have a hash
+        if path == ".tree_info.toml"
+            isdefined(path_info, :hash) ||
+                error("missing required hash value for $path in $file")
+        end
+    end
+
+    # ensure that all directories are included
+    for path in keys(paths)
+        leaf = path
+        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
+            path = String(m.captures[1])
+            path in keys(paths) ||
+                error("missing entry for directory $(repr(path)) in $file")
+            paths[path].type == :directory ||
+                error("path $path not a directory but contains $(repr(leaf)) in $file")
+        end
+    end
+
+    return paths
+end
+
+## representing & manipulating a tree of path nodes ##
+
 mutable struct PathNode
     type::Symbol
     hash::String
@@ -255,67 +393,6 @@ function from_toml(data::Dict{<:AbstractString})
     return node
 end
 
-function extract_tree(
-    tarball::AbstractString,
-    root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing;
-    can_symlink::Union{Bool, Nothing} = nothing,
-    HashType::DataType = SHA.SHA1_CTX,
-)
-    # remove destination first if it exists
-    ispath(root) && @warn "path already exists, replacing" path=root
-
-    # create tree info structure
-    tree = PathNode(:directory)
-    temp, can_symlink = temp_path(root, can_symlink)
-
-    # extract tarball, recording contents
-    open(`gzcat $tarball`) do io
-        Tar.extract(io, temp) do hdr
-            executable = hdr.type == :file && (hdr.mode & 0o100) != 0
-            node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
-            hdr.type == :symlink && (node.link = hdr.link)
-            hdr.type != :symlink || can_symlink
-        end
-    end
-    resolve_symlinks!(tree)
-    compute_hashes!(temp, tree; HashType)
-
-    # simulate simlinks with copies
-    !can_symlink && copy_symlinks(temp, tree)
-
-    # verify the tree has the expected hash
-    if hash !== nothing && tree.hash != hash
-        tree_hash = tree.hash
-        prune_empty_trees!(tree)
-        compute_hashes!(temp, tree; HashType)
-        if tree.hash != hash
-            msg  = "Tree hash mismatch!\n"
-            msg *= "  Expected: $hash\n"
-            msg *= "  Computed: $tree_hash"
-            rm(temp, recursive=true)
-            error(msg)
-        end
-    end
-
-    # if tree_info path exists, remove it
-    tree_info_file = joinpath(temp, ".tree_info.toml")
-    if haskey(tree.children, ".tree_info.toml")
-        @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
-        rm(tree_info_file, recursive=true)
-    end
-
-    # construct & write tree_info to file
-    tree_info = to_toml(tree)
-    open(tree_info_file, write=true) do io
-        TOML.print(io, sorted=true, tree_info)
-    end
-
-    # move temp dir to right place
-    mv(temp, root, force=true)
-    return
-end
-
 ## the rest of the API ##
 
 function fsck_tree(
@@ -349,81 +426,6 @@ function patch_tree(
     BSDiff.apply_patch(codeunits(old), diff) do io
         extract_tree(io, new_root, new_hash; HashType)
     end
-end
-
-## type for representing `.tree_info.toml` data ##
-
-function tree_info(root::AbstractString)
-    # look for the `.tree_info.toml` file
-    file = joinpath(root, ".tree_info.toml")
-    isdir(root) ||
-        error("no directory found at $root")
-    ispath(file) ||
-        error("no tree info file found at $file")
-
-    # load the TOML data
-    data = TOML.parsefile(file)
-
-    # extract and validiate path entries
-    tree = from_toml(data)
-
-    for (path, info) in data
-        # validate the path itself
-        # TODO: validate path (check non-empty, no '/' and not '.' or '..')
-        is_valid_tar_path(path) ||
-            error("contains invalid path: $(repr(path)) in $file")
-        # get the path type
-        haskey(info, "type") ||
-            error("missing `type` field for $path in $file")
-        type = info["type"]
-        type in ("symlink", "directory", "executable", "file") ||
-            error("invalid `type` field, $(repr(type)), for $path in $file")
-        type = Symbol(type)
-        path_info = PathInfo(type)
-        # ensure link field iff symlink
-        if type == :symlink
-            haskey(info, "link") ||
-                error("missing `link` field for symlink $path in $file")
-            link = info["link"]
-            link isa AbstractString ||
-                error("invalid `link` field, $(repr(link)), for $path in $file")
-            path_info.link = link
-        else
-            haskey(info, "link") &&
-                error("`link` field present for non-symlink $path in $file")
-        end
-        # validate hash field if there is one
-        if haskey(info, "hash")
-            hash = info["hash"]
-            hash isa AbstractString ||
-                error("invalid `hash` value, $(repr(hash)), for $path in $file")
-            hash = try normalize_hash(hash)
-            catch err
-                err isa ArgumentError || rethrow()
-                error("invalid `hash`, $(repr(hash)), for $path in $file:\n$(err.msg)")
-            end
-            path_info.hash = hash
-        end            
-        # `.tree_info.toml` must have a hash
-        if path == ".tree_info.toml"
-            isdefined(path_info, :hash) ||
-                error("missing required hash value for $path in $file")
-        end
-    end
-
-    # ensure that all directories are included
-    for path in keys(paths)
-        leaf = path
-        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
-            path = String(m.captures[1])
-            path in keys(paths) ||
-                error("missing entry for directory $(repr(path)) in $file")
-            paths[path].type == :directory ||
-                error("path $path not a directory but contains $(repr(leaf)) in $file")
-        end
-    end
-
-    return paths
 end
 
 ## git hashing ##
