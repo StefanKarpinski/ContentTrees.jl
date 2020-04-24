@@ -85,63 +85,9 @@ function tree_info(root::AbstractString)
     data = TOML.parsefile(file)
     tree = from_toml(data)
 
-    for (path, info) in data
-        # validate the path itself
-        # TODO: validate path (check non-empty, no '/' and not '.' or '..')
-        is_valid_tar_path(path) ||
-            error("contains invalid path: $(repr(path)) in $file")
-        # get the path type
-        haskey(info, "type") ||
-            error("missing `type` field for $path in $file")
-        type = info["type"]
-        type in ("symlink", "directory", "executable", "file") ||
-            error("invalid `type` field, $(repr(type)), for $path in $file")
-        type = Symbol(type)
-        path_info = PathInfo(type)
-        # ensure link field iff symlink
-        if type == :symlink
-            haskey(info, "link") ||
-                error("missing `link` field for symlink $path in $file")
-            link = info["link"]
-            link isa AbstractString ||
-                error("invalid `link` field, $(repr(link)), for $path in $file")
-            path_info.link = link
-        else
-            haskey(info, "link") &&
-                error("`link` field present for non-symlink $path in $file")
-        end
-        # validate hash field if there is one
-        if haskey(info, "hash")
-            hash = info["hash"]
-            hash isa AbstractString ||
-                error("invalid `hash` value, $(repr(hash)), for $path in $file")
-            hash = try normalize_hash(hash)
-            catch err
-                err isa ArgumentError || rethrow()
-                error("invalid `hash`, $(repr(hash)), for $path in $file:\n$(err.msg)")
-            end
-            path_info.hash = hash
-        end
-        # `.tree_info.toml` must have a hash
-        if path == ".tree_info.toml"
-            isdefined(path_info, :hash) ||
-                error("missing required hash value for $path in $file")
-        end
-    end
+    verify_hashes(tree)
 
-    # ensure that all directories are included
-    for path in keys(paths)
-        leaf = path
-        while (m = match(r"^(.*[^/])/+[^/]+$", path)) !== nothing
-            path = String(m.captures[1])
-            path in keys(paths) ||
-                error("missing entry for directory $(repr(path)) in $file")
-            paths[path].type == :directory ||
-                error("path $path not a directory but contains $(repr(leaf)) in $file")
-        end
-    end
-
-    return paths
+    return tree
 end
 
 ## representing & manipulating a tree of path nodes ##
@@ -382,7 +328,10 @@ function from_toml(data::Dict{<:AbstractString})
             error("invalid value for `link` key: $(repr(link))")
         node.link = link
     end
-    if type == :directory
+    if type == :symlink
+        isdefined(node, :link) ||
+            error("symlink entry without `link`: $(repr(data))")
+    elseif type == :directory
         for (key, value) in data
             key in METADATA_KEYS && continue
             child = from_toml(value)
