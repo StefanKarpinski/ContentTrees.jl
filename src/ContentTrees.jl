@@ -200,12 +200,13 @@ end
 isanscestor(a::PathNode, b::PathNode) =
     a === b || isdefined(b, :parent) && isanscestor(a, b.parent)
 
-const METADATA_KEYS = split("type link target hash")
+const METADATA_KEYS = split("type link hash")
 
 name_to_key(name::AbstractString)::String =
     name in METADATA_KEYS ? "./$name" : name
+
 key_to_name(key::AbstractString)::String =
-    startswith("./") ? chop(key, head=2, tail=0) : key
+    startswith(key, "./") ? chop(key, head=2, tail=0) : key
 
 function to_toml(node::PathNode)
     dict = Dict{String,Any}()
@@ -226,6 +227,32 @@ function to_toml(node::PathNode)
         end
     end
     return dict
+end
+
+function from_toml(data::Dict{<:AbstractString})
+    type = Symbol(get(data, "type", "dictionary"))
+    node = PathNode(type)
+    hash = get(data, "hash", nothing)
+    if hash !== nothing
+        hash isa AbstractString ||
+            error("invalid value for `hash` key: $(repr(hash))")
+        node.hash = normalize_hash(hash)
+    end
+    link = get(data, "link", nothing)
+    if link !== nothing
+        link isa AbstractString ||
+            error("invalid value for `link` key: $(repr(link))")
+        node.link = link
+    end
+    if type == :directory
+        for (key, value) in data
+            key in METADATA_KEYS && continue
+            child = from_toml(value)
+            child.parent = node
+            node.children[key_to_name(key)] = child
+        end
+    end
+    return node
 end
 
 function extract_tree(
@@ -289,22 +316,57 @@ function extract_tree(
     return
 end
 
+## the rest of the API ##
+
+function fsck_tree(
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    can_symlink::Union{Bool, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    # check and, if possible, fix the content tree at `root`
+end
+
+function repack_tree(
+    tar::IO,
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    # convert tree at `root` back into a tarball
+end
+
+function patch_tree(
+    patch::AbstractString,
+    old_root::AbstractString, old_hash::AbstractString,
+    new_root::AbstractString, new_hash::AbstractString,
+    can_symlink::Union{Bool, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    old = sprint() do io
+        repack_tree(io, old_root, old_hash; HashType)
+    end
+    BSDiff.apply_patch(codeunits(old), diff) do io
+        extract_tree(io, new_root, new_hash; HashType)
+    end
+end
+
 ## type for representing `.tree_info.toml` data ##
 
 function tree_info(root::AbstractString)
+    # look for the `.tree_info.toml` file
     file = joinpath(root, ".tree_info.toml")
     isdir(root) ||
         error("no directory found at $root")
     ispath(file) ||
         error("no tree info file found at $file")
+
+    # load the TOML data
     data = TOML.parsefile(file)
 
-    # extract and validate the git tree hash
-    haskey(data, ".") ||
-        error("missing root entry in $file")
-
     # extract and validiate path entries
-    paths = Dict{String,PathInfo}()
+    tree = from_toml(data)
+
     for (path, info) in data
         # validate the path itself
         # TODO: validate path (check non-empty, no '/' and not '.' or '..')
