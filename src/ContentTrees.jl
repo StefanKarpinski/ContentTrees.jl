@@ -71,6 +71,40 @@ function extract_tree(
     return
 end
 
+function fsck_tree(
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    can_symlink::Union{Bool, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    # check and, if possible, fix the content tree at `root`
+end
+
+function repack_tree(
+    tar::IO,
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    tree = tree_info(root)
+
+end
+
+function patch_tree(
+    patch::AbstractString,
+    old_root::AbstractString, old_hash::AbstractString,
+    new_root::AbstractString, new_hash::AbstractString,
+    can_symlink::Union{Bool, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    old = sprint() do io
+        repack_tree(io, old_root, old_hash; HashType)
+    end
+    BSDiff.apply_patch(codeunits(old), diff) do io
+        extract_tree(io, new_root, new_hash; HashType)
+    end
+end
+
 ## loading and validating `.tree_info.toml` as PathNode tree ##
 
 function tree_info(root::AbstractString)
@@ -84,8 +118,7 @@ function tree_info(root::AbstractString)
     # load data & convert to PathNode tree
     data = TOML.parsefile(file)
     tree = from_toml(data)
-
-    verify_hashes(tree)
+    resolve_symlinks!(tree)
 
     return tree
 end
@@ -340,41 +373,6 @@ function from_toml(data::Dict{<:AbstractString})
         end
     end
     return node
-end
-
-## the rest of the API ##
-
-function fsck_tree(
-    root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing;
-    can_symlink::Union{Bool, Nothing} = nothing,
-    HashType::DataType = SHA.SHA1_CTX,
-)
-    # check and, if possible, fix the content tree at `root`
-end
-
-function repack_tree(
-    tar::IO,
-    root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing;
-    HashType::DataType = SHA.SHA1_CTX,
-)
-    # convert tree at `root` back into a tarball
-end
-
-function patch_tree(
-    patch::AbstractString,
-    old_root::AbstractString, old_hash::AbstractString,
-    new_root::AbstractString, new_hash::AbstractString,
-    can_symlink::Union{Bool, Nothing} = nothing,
-    HashType::DataType = SHA.SHA1_CTX,
-)
-    old = sprint() do io
-        repack_tree(io, old_root, old_hash; HashType)
-    end
-    BSDiff.apply_patch(codeunits(old), diff) do io
-        extract_tree(io, new_root, new_hash; HashType)
-    end
 end
 
 ## git hashing ##
