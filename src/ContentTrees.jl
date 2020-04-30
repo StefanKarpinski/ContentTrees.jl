@@ -42,12 +42,16 @@ function extract_tree(
     # verify the tree has the expected hash
     if hash !== nothing && tree.hash != hash
         tree_hash = tree.hash
-        prune_empty_trees!(tree)
-        compute_hashes!(temp, tree; HashType)
+        prune_empty_trees!(tree; HashType)
         if tree.hash != hash
             msg  = "Tree hash mismatch!\n"
             msg *= "  Expected: $hash\n"
-            msg *= "  Computed: $tree_hash"
+            if tree_hash == tree.hash
+                msg *= "  Computed: $tree_hash"
+            else
+                msg *= "  Computed: $(tree_hash) (including empty trees)\n"
+                msg *= "  Computed: $(tree.hash) (excluding empty trees)"
+            end
             rm(temp, recursive=true)
             error(msg)
         end
@@ -211,39 +215,16 @@ function follow_symlinks!(node::PathNode)
     end
 end
 
-function prune_empty_trees!(node::PathNode)
-    node.type != :directory && return false
-    for (name, child) in collect(node.children)
-        prune_empty_trees!(child) && pop!(node.children, name)
-    end
-    return isempty(node.children)
-end
-
 function compute_hashes!(
     path::AbstractString,
     node::PathNode;
     HashType::DataType = SHA.SHA1_CTX,
 )
     if node.type == :directory
-        nodes = Pair{String,PathNode}[
-            name => child for (name, child) in node.children
-        ]
-        let by((name, child)) = child.type == :directory ? "$name/" : name
-            sort!(nodes; by)
-        end
-        for (name, child) in nodes
+        for (name, child) in node.children
             compute_hashes!(joinpath(path, name), child; HashType)
         end
-        node.hash = git_object_hash("tree"; HashType) do io
-            for (name, child) in nodes
-                mode = child.type == :directory  ?  "40000" :
-                       child.type == :executable ? "100755" :
-                       child.type == :file       ? "100644" :
-                       child.type == :symlink    ? "120000" : @assert false
-                print(io, mode, ' ', name, '\0')
-                write(io, hex2bytes(child.hash))
-            end
-        end
+        node.hash = git_tree_hash(node; HashType)
     elseif node.type == :symlink
         node.hash = git_object_hash("blob"; HashType) do io
             write(io, node.link)
@@ -251,6 +232,50 @@ function compute_hashes!(
     else # file/executable
         node.hash = git_object_hash("blob"; HashType) do io
             write(io, read(path)) # TODO: more efficient sendfile
+        end
+    end
+end
+
+function prune_empty_trees!(
+    node::PathNode;
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    node.type == :directory || return false
+    dirty = isempty(node.children)
+    for (name, child) in collect(node.children)
+        prune_empty_trees!(child; HashType) || continue
+        isempty(child.children) && pop!(node.children, name)
+        dirty = true
+    end
+    dirty || return false
+    node.hash = git_tree_hash(node; HashType)
+    return true
+end
+
+function git_tree_hash(
+    node::PathNode;
+    HashType::DataType = SHA.SHA1_CTX,
+)
+    node.type == :directory ||
+        throw(ArgumentError("not a directory: $node"))
+
+    # collect and sort children in git-tree order
+    children = Pair{String,PathNode}[
+        name => child for (name, child) in node.children
+    ]
+    let by((name, child)) = child.type == :directory ? "$name/" : name
+        sort!(children; by)
+    end
+
+    # compute and return the tree hash
+    return git_object_hash("tree"; HashType) do io
+        for (name, child) in children
+            mode = child.type == :directory  ?  "40000" :
+                   child.type == :executable ? "100755" :
+                   child.type == :file       ? "100644" :
+                   child.type == :symlink    ? "120000" : @assert false
+            print(io, mode, ' ', name, '\0')
+            write(io, hex2bytes(child.hash))
         end
     end
 end
@@ -417,7 +442,7 @@ const REPLACEMENT_TYPES = Dict(
     :symlink    => [:directory, :executable, :file],
 )
 
-function git_tree_hash(
+false && function git_tree_hash(
     paths::Dict{String,PathNode},
     sys_path::AbstractString,
     tar_path::AbstractString = "";
