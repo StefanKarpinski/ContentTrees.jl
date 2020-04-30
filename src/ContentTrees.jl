@@ -43,7 +43,10 @@ function extract_tree(
     if hash !== nothing && tree.hash != hash
         tree_hash = tree.hash
         prune_empty_trees!(tree; HashType)
-        if tree.hash != hash
+        if tree.hash == hash
+            isdefined(tree, :extra) || (tree.extra = Dict{String,Any}())
+            tree.extra["diffable"] = false
+        else
             msg  = "Tree hash mismatch!\n"
             msg *= "  Expected: $hash\n"
             if tree_hash == tree.hash
@@ -136,6 +139,7 @@ mutable struct PathNode
     copy::Union{PathNode,Nothing}
     parent::PathNode
     children::Dict{String,PathNode}
+    extra::Dict{String,Any}
     function PathNode(type::Symbol)
         node = new(type)
         if type == :directory
@@ -360,6 +364,9 @@ function to_toml(node::PathNode)
         for (name, child) in node.children
             dict[name_to_key(name)] = to_toml(child)
         end
+        if isdefined(node, :extra) && !isempty(node.extra)
+            dict["."] = copy(node.extra)
+        end
     else
         dict["type"] = node.type
         if node.type == :symlink
@@ -367,6 +374,7 @@ function to_toml(node::PathNode)
         else
             dict["hash"] = node.hash
         end
+        isdefined(node, :extra) && merge!(dict, node.extra)
     end
     return dict
 end
@@ -389,12 +397,27 @@ function from_toml(data::Dict{<:AbstractString})
     if type == :symlink
         isdefined(node, :link) ||
             error("symlink entry without `link`: $(repr(data))")
-    elseif type == :directory
+    end
+    if type == :directory
         for (key, value) in data
             key in METADATA_KEYS && continue
-            child = from_toml(value)
-            child.parent = node
-            node.children[key_to_name(key)] = child
+            if key == "."
+                value isa AbstractDict ||
+                    error("entry for `.` is not a dictionary: $(repr(value))")
+                node.extra = copy(value)
+            else
+                child = from_toml(value)
+                child.parent = node
+                node.children[key_to_name(key)] = child
+            end
+        end
+    else
+        for (key, value) in  data
+            key in METADATA_KEYS && continue
+            if !isdefined(node, :extra)
+                node.extra = Dict{String,Any}()
+            end
+            node.extra[key] = value
         end
     end
     return node
