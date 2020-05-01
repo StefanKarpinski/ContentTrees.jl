@@ -360,12 +360,13 @@ end
 
 function copy_symlinks(root::AbstractString, node::PathNode)
     if node.type == :symlink
-        link = node_path(root, node)
+        path = node_path(root, node)
         if node.copy === nothing
             @warn("skipping copy of broken, circular or external symlink",
-                path=link, link=node.link)
-        else
-            cp(node_path(root, node.copy), link)
+                path, node.link)
+        elseif !ispath(path)
+            copy_symlinks(root, node.copy)
+            cp(node_path(root, node.copy), path)
         end
     elseif node.type == :directory
         for child in values(node.children)
