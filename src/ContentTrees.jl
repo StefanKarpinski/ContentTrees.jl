@@ -238,9 +238,9 @@ function verify_hashes!(
     path::AbstractString;
     HashType::DataType,
 )
-    errors = Tuple{PathNode,String,String}[]
+    errors = Tuple{String,String}[]
     verify_hashes!(node, path; HashType) do node, path, msg
-        push!(errors, (node, path, msg))
+        push!(errors, (path, msg))
     end
     return errors
 end
@@ -454,7 +454,10 @@ function to_toml(node::PathNode)
 end
 
 function from_toml(data::Dict{<:AbstractString})
-    type = Symbol(get(data, "type", "directory"))
+    type = get(data, "type", "directory")
+    type in ("directory", "symlink", "file", "executable") ||
+        error("invalid node type: $(repr(type))")
+    type = Symbol(type)
     node = PathNode(type)
     hash = get(data, "hash", nothing)
     if hash !== nothing
