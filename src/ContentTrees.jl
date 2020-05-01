@@ -1,6 +1,6 @@
 module ContentTrees
 
-export extract_tree
+export extract_tree, verify_tree
 
 import Logging
 import Pkg.TOML
@@ -34,7 +34,7 @@ function extract_tree(
         end
     end
     resolve_symlinks!(tree)
-    compute_hashes!(temp, tree; HashType)
+    compute_hashes!(tree, temp; HashType)
 
     # simulate simlinks with copies
     !can_symlink && copy_symlinks(temp, tree)
@@ -75,16 +75,17 @@ function extract_tree(
 
     # move temp dir to right place
     mv(temp, root, force=true)
-    return
+    return tree.hash
 end
 
-function fsck_tree(
+function verify_tree(
     root::AbstractString,
     hash::Union{AbstractString, Nothing} = nothing;
-    can_symlink::Union{Bool, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
 )
-    # check and, if possible, fix the content tree at `root`
+    tree = tree_info(root)
+    resolve_symlinks!(tree)
+    verify_hashes!(tree, root; HashType)
 end
 
 function repack_tree(
@@ -220,29 +221,93 @@ function follow_symlinks!(node::PathNode)
 end
 
 function compute_hashes!(
-    path::AbstractString,
-    node::PathNode;
-    HashType::DataType = SHA.SHA1_CTX,
+    node::PathNode,
+    path::AbstractString;
+    HashType::DataType,
 )
     if node.type == :directory
         for (name, child) in node.children
-            compute_hashes!(joinpath(path, name), child; HashType)
+            compute_hashes!(child, joinpath(path, name); HashType)
         end
-        node.hash = git_tree_hash(node; HashType)
+    end
+    node.hash = git_hash(node, path; HashType)
+end
+
+function verify_hashes!(
+    node::PathNode,
+    path::AbstractString;
+    HashType::DataType,
+)
+    errors = Tuple{PathNode,String,String}[]
+    verify_hashes!(node, path; HashType) do node, path, msg
+        push!(errors, (node, path, msg))
+    end
+    return errors
+end
+
+function verify_hashes!(
+    handler::Function,
+    node::PathNode,
+    path::AbstractString;
+    HashType::DataType,
+)
+    # helper to invoke the error handler callback
+    err(msg::AbstractString) = handler(node, path, msg)
+
+    # check external consistency
+    stat = lstat(path)
+    if node.type == :directory
+        if isdir(stat)
+            for (name, child) in node.children
+                verify_hashes!(handler, child, joinpath(path, name); HashType)
+            end
+        else
+            err("missing directory")
+        end
     elseif node.type == :symlink
-        node.hash = git_object_hash("blob"; HashType) do io
-            write(io, node.link)
+        if islink(stat)
+            link = readlink(path)
+            if node.link != link
+                err("incorrect symlink ($(repr(link))")
+            end
+        elseif node.copy !== nothing
+            if ispath(stat)
+                verify_hashes!(handler, node.copy, path; HashType)
+            else
+                err("missing symlink")
+            end
+        elseif ispath(stat)
+            err("should be a symlink")
         end
     else # file/executable
-        node.hash = git_object_hash("blob"; HashType) do io
-            write(io, read(path)) # TODO: more efficient sendfile
+        if isfile(stat)
+            hash = git_hash(node, path; HashType)
+            if node.hash != hash
+                err("file modified ($hash)")
+            end
+        elseif ispath(stat)
+            err("should be a file")
+        else
+            err("missing file")
+        end
+    end
+
+    # check internal consistency
+    if node.type in (:directory, :symlink)
+        hash = git_hash(node; HashType)
+        if isdefined(node, :hash)
+            if node.hash != hash
+                err("hash inconsistency ($hash)")
+            end
+        else
+            node.hash = hash
         end
     end
 end
 
 function prune_empty_trees!(
     node::PathNode;
-    HashType::DataType = SHA.SHA1_CTX,
+    HashType::DataType,
 )
     node.type == :directory || return false
     dirty = isempty(node.children)
@@ -252,34 +317,43 @@ function prune_empty_trees!(
         dirty = true
     end
     dirty || return false
-    node.hash = git_tree_hash(node; HashType)
+    node.hash = git_hash(node; HashType)
     return true
 end
 
-function git_tree_hash(
-    node::PathNode;
-    HashType::DataType = SHA.SHA1_CTX,
+function git_hash(
+    node::PathNode,
+    path::Union{AbstractString, Nothing} = nothing;
+    HashType::DataType,
 )
-    node.type == :directory ||
-        throw(ArgumentError("not a directory: $node"))
+    if node.type == :directory
+        # collect and sort children in git-tree order
+        children = Pair{String,PathNode}[
+            name => child for (name, child) in node.children
+        ]
+        let by((name, child)) = child.type == :directory ? "$name/" : name
+            sort!(children; by)
+        end
 
-    # collect and sort children in git-tree order
-    children = Pair{String,PathNode}[
-        name => child for (name, child) in node.children
-    ]
-    let by((name, child)) = child.type == :directory ? "$name/" : name
-        sort!(children; by)
-    end
-
-    # compute and return the tree hash
-    return git_object_hash("tree"; HashType) do io
-        for (name, child) in children
-            mode = child.type == :directory  ?  "40000" :
-                   child.type == :executable ? "100755" :
-                   child.type == :file       ? "100644" :
-                   child.type == :symlink    ? "120000" : @assert false
-            print(io, mode, ' ', name, '\0')
-            write(io, hex2bytes(child.hash))
+        # compute and return the tree hash
+        return git_object_hash("tree"; HashType) do io
+            for (name, child) in children
+                mode = child.type == :directory  ?  "40000" :
+                       child.type == :executable ? "100755" :
+                       child.type == :file       ? "100644" :
+                       child.type == :symlink    ? "120000" : @assert false
+                print(io, mode, ' ', name, '\0')
+                write(io, hex2bytes(child.hash))
+            end
+        end
+    elseif node.type == :symlink
+        return git_object_hash("blob"; HashType) do io
+            write(io, node.link)
+        end
+    else # file/executable
+        path === nothing && error("git_hash called on file without a path")
+        return git_object_hash("blob"; HashType) do io
+            write(io, read(path))
         end
     end
 end
@@ -380,7 +454,7 @@ function to_toml(node::PathNode)
 end
 
 function from_toml(data::Dict{<:AbstractString})
-    type = Symbol(get(data, "type", "dictionary"))
+    type = Symbol(get(data, "type", "directory"))
     node = PathNode(type)
     hash = get(data, "hash", nothing)
     if hash !== nothing
@@ -403,7 +477,7 @@ function from_toml(data::Dict{<:AbstractString})
             key in METADATA_KEYS && continue
             if key == "."
                 value isa AbstractDict ||
-                    error("entry for `.` is not a dictionary: $(repr(value))")
+                    error("entry for `.` is not a dict: $(repr(value))")
                 node.extra = copy(value)
             else
                 child = from_toml(value)
@@ -423,7 +497,11 @@ function from_toml(data::Dict{<:AbstractString})
     return node
 end
 
-function git_object_hash(emit::Function, kind::AbstractString; HashType::DataType)
+function git_object_hash(
+    emit::Function,
+    kind::AbstractString;
+    HashType::DataType,
+)
     ctx = HashType()
     body = codeunits(sprint(emit))
     SHA.update!(ctx, codeunits("$kind $(length(body))\0"))
