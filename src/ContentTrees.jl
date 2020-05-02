@@ -84,7 +84,6 @@ function verify_tree(
     HashType::DataType = SHA.SHA1_CTX,
 )
     tree = tree_info(root)
-    resolve_symlinks!(tree)
     verify_hashes!(tree, root; HashType)
 end
 
@@ -240,7 +239,7 @@ function verify_hashes!(
 )
     errors = Tuple{String,String}[]
     verify_hashes!(node, path; HashType) do node, path, msg
-        push!(errors, (path, msg))
+        push!(errors, (msg, path))
     end
     return errors
 end
