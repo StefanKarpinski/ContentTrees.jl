@@ -84,7 +84,19 @@ function verify_tree(
     HashType::DataType = SHA.SHA1_CTX,
 )
     tree = tree_info(root)
-    verify_hashes!(tree, root; HashType)
+    errors = Dict{String,Vector{String}}()
+    verify_hashes!(tree, root; HashType) do node, path, msg
+        haskey(errors, msg) || (errors[msg] = String[])
+        push!(errors[msg], relpath(path, root))
+    end
+    isempty(errors) && return
+    err = "Content tree $(repr(root)) has been modified:"
+    for (msg, paths) in sort!(collect(errors))
+        for path in sort!(paths)
+            err *= "\n - $(repr(path)): $msg"
+        end
+    end
+    error(err)
 end
 
 function repack_tree(
@@ -233,18 +245,6 @@ function compute_hashes!(
 end
 
 function verify_hashes!(
-    node::PathNode,
-    path::AbstractString;
-    HashType::DataType,
-)
-    errors = Tuple{String,String}[]
-    verify_hashes!(node, path; HashType) do node, path, msg
-        push!(errors, (msg, path))
-    end
-    return errors
-end
-
-function verify_hashes!(
     handler::Function,
     node::PathNode,
     path::AbstractString;
@@ -267,7 +267,7 @@ function verify_hashes!(
         if islink(stat)
             link = readlink(path)
             if node.link != link
-                err("incorrect symlink ($(repr(link))")
+                err("incorrect symlink ($(repr(link)))")
             end
         elseif node.copy !== nothing
             if ispath(stat)
