@@ -44,8 +44,7 @@ function extract_tree(
         tree_hash = tree.hash
         prune_empty_trees!(tree; HashType)
         if tree.hash == hash
-            isdefined(tree, :extra) || (tree.extra = Dict{String,Any}())
-            tree.extra["diffable"] = false
+            set_extra!(tree, "diffable", false)
         else
             msg  = "Tree hash mismatch!\n"
             msg *= "  Expected: $hash\n"
@@ -63,6 +62,7 @@ function extract_tree(
     # if tree_info path exists, remove it
     tree_info_file = joinpath(temp, ".tree_info.toml")
     if haskey(tree.children, ".tree_info.toml")
+        set_extra!(tree, "diffable", false)
         @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
         rm(tree_info_file, recursive=true)
     end
@@ -106,13 +106,12 @@ function repack_tree(
     HashType::DataType = SHA.SHA1_CTX,
 )
     tree = tree_info(root)
-
 end
 
 function patch_tree(
     patch::AbstractString,
-    old_root::AbstractString, old_hash::AbstractString,
-    new_root::AbstractString, new_hash::AbstractString,
+    old_root::AbstractString,
+    new_root::AbstractString;
     can_symlink::Union{Bool, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
 )
@@ -187,6 +186,13 @@ function Base.show(io::IO, node::PathNode)
         print(io, "}")
     end
     print(io, ")")
+end
+
+function set_extra!(node::PathNode, key::String, value::Any)
+    if !isdefined(node, :extra)
+        node.extra = Dict{String,Any}()
+    end
+    node.extra[key] = value
 end
 
 function path_node!(tree::PathNode, path::AbstractString, type::Symbol)
@@ -491,10 +497,7 @@ function from_toml(data::Dict{<:AbstractString})
     else
         for (key, value) in  data
             key in METADATA_KEYS && continue
-            if !isdefined(node, :extra)
-                node.extra = Dict{String,Any}()
-            end
-            node.extra[key] = value
+            set_extra!(node, key, value)
         end
     end
     return node
