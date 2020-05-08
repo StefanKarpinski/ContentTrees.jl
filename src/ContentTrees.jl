@@ -42,10 +42,8 @@ function extract_tree(
     # verify the tree has the expected hash
     if hash !== nothing && tree.hash != hash
         tree_hash = tree.hash
-        prune_empty_trees!(tree; HashType)
-        if tree.hash == hash
-            set_extra!(tree, "diffable", false)
-        else
+        skip_empty_directories!(tree; HashType)
+        if tree.hash != hash
             msg  = "Tree hash mismatch!\n"
             msg *= "  Expected: $hash\n"
             if tree_hash == tree.hash
@@ -54,6 +52,7 @@ function extract_tree(
                 msg *= "  Computed: $(tree_hash) (including empty trees)\n"
                 msg *= "  Computed: $(tree.hash) (excluding empty trees)"
             end
+            chmod(temp, 0o700, recursive=true)
             rm(temp, recursive=true)
             error(msg)
         end
@@ -64,6 +63,7 @@ function extract_tree(
     if haskey(tree.children, ".tree_info.toml")
         set_extra!(tree, "diffable", false)
         @warn "overwriting extracted `.tree_info.toml`" path=tree_info_file
+        chmod(tree_info_file, 0o700, recursive=true)
         rm(tree_info_file, recursive=true)
     end
 
@@ -229,7 +229,7 @@ end
 function follow_symlinks!(node::PathNode)
     if node.type == :symlink && node.copy !== nothing
         node.copy = follow_symlinks(node.copy, [node])
-        if node.copy !== nothing && isanscestor(node.copy, node)
+        if node.copy !== nothing && is_anscestor(node.copy, node)
             node.copy = nothing
         end
     elseif node.type == :directory
@@ -255,6 +255,7 @@ function verify_hashes!(
     node::PathNode,
     path::AbstractString;
     HashType::DataType,
+    skip_empty::Bool = false,
 )
     # helper to invoke the error handler callback
     err(msg::AbstractString) = handler(node, path, msg)
@@ -310,19 +311,17 @@ function verify_hashes!(
     end
 end
 
-function prune_empty_trees!(
+function skip_empty_directories!(
     node::PathNode;
     HashType::DataType,
 )
     node.type == :directory || return false
     dirty = isempty(node.children)
     for (name, child) in collect(node.children)
-        prune_empty_trees!(child; HashType) || continue
-        isempty(child.children) && pop!(node.children, name)
-        dirty = true
+        dirty |= skip_empty_directories!(child; HashType)
     end
     dirty || return false
-    node.hash = git_hash(node; HashType)
+    node.hash = git_hash(node; HashType, skip_empty = true)
     return true
 end
 
@@ -330,6 +329,7 @@ function git_hash(
     node::PathNode,
     path::Union{AbstractString, Nothing} = nothing;
     HashType::DataType,
+    skip_empty::Bool = false,
 )
     if node.type == :directory
         # collect and sort children in git-tree order
@@ -343,6 +343,7 @@ function git_hash(
         # compute and return the tree hash
         return git_object_hash("tree"; HashType) do io
             for (name, child) in children
+                skip_empty && is_empty_directory(child) && continue
                 mode = child.type == :directory  ?  "40000" :
                        child.type == :executable ? "100755" :
                        child.type == :file       ? "100644" :
@@ -423,8 +424,11 @@ function node_path(root::Union{AbstractString, Nothing}, node::PathNode)
     error("internal error: node doesn't appear in parent's children")
 end
 
-isanscestor(a::PathNode, b::PathNode) =
-    a === b || isdefined(b, :parent) && isanscestor(a, b.parent)
+is_empty_directory(node::PathNode) =
+    node.type == :directory && all(is_empty_directory, values(node.children))
+
+is_anscestor(a::PathNode, b::PathNode) =
+    a === b || isdefined(b, :parent) && is_anscestor(a, b.parent)
 
 const METADATA_KEYS = split("type link hash")
 
