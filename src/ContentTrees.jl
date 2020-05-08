@@ -40,23 +40,23 @@ function extract_tree(
     !can_symlink && copy_symlinks(temp, tree)
 
     # verify the tree has the expected hash
-    if hash !== nothing && tree.hash != hash
-        tree_hash = tree.hash
-        skip_empty_directories!(tree; HashType)
-        if tree.hash != hash
-            msg  = "Tree hash mismatch!\n"
-            msg *= "  Expected: $hash\n"
-            if tree_hash == tree.hash
-                msg *= "  Computed: $tree_hash"
-            else
-                msg *= "  Computed: $(tree_hash) (including empty trees)\n"
-                msg *= "  Computed: $(tree.hash) (excluding empty trees)"
-            end
-            chmod(temp, 0o700, recursive=true)
-            rm(temp, recursive=true)
-            error(msg)
+    if hash !== nothing && hash ∉ tree.hash
+        msg  = "Tree hash mismatch!\n"
+        msg *= "  Expected: $hash\n"
+        if tree.hash[1] == tree.hash[2]
+            msg *= "  Computed: $(tree.hash[1])"
+        else
+            msg *= "  Computed: $(tree.hash[1]) (excluding empty trees)\n"
+            msg *= "  Computed: $(tree.hash[2]) (including empty trees)"
         end
+        chmod(temp, 0o700, recursive=true)
+        rm(temp, recursive=true)
+        error(msg)
     end
+
+    # are we skipping empty trees?
+    skip_empty = hash !== nothing && hash == tree.hash[2]
+    @assert hash === nothing || hash == tree.hash[skip_empty+1]
 
     # if tree_info path exists, remove it
     tree_info_file = joinpath(temp, ".tree_info.toml")
@@ -68,14 +68,14 @@ function extract_tree(
     end
 
     # construct & write tree_info to file
-    tree_info = to_toml(tree)
+    tree_info = to_toml(tree; skip_empty)
     open(tree_info_file, write=true) do io
         TOML.print(io, sorted=true, tree_info)
     end
 
     # move temp dir to right place
     mv(temp, root, force=true)
-    return tree.hash
+    return tree.hash[skip_empty+1]
 end
 
 function verify_tree(
@@ -83,7 +83,7 @@ function verify_tree(
     hash::Union{AbstractString, Nothing} = nothing;
     HashType::DataType = SHA.SHA1_CTX,
 )
-    tree = tree_info(root)
+    tree = tree_info(root; HashType)
     errors = Dict{String,Vector{String}}()
     verify_hashes!(tree, root; HashType) do node, path, msg
         haskey(errors, msg) || (errors[msg] = String[])
@@ -125,7 +125,10 @@ end
 
 ## loading and validating `.tree_info.toml` as PathNode tree ##
 
-function tree_info(root::AbstractString)
+function tree_info(
+    root::AbstractString;
+    HashType::DataType = SHA.SHA1_CTX,
+)
     # look for the `.tree_info.toml` file
     file = joinpath(root, ".tree_info.toml")
     isdir(root) ||
@@ -135,7 +138,7 @@ function tree_info(root::AbstractString)
 
     # load data & convert to PathNode tree
     data = TOML.parsefile(file)
-    tree = from_toml(data)
+    tree = from_toml(data; HashType)
     resolve_symlinks!(tree)
 
     return tree
@@ -145,7 +148,7 @@ end
 
 mutable struct PathNode
     type::Symbol
-    hash::String
+    hash::NTuple{2,String}
     link::String
     copy::Union{PathNode,Nothing}
     parent::PathNode
@@ -247,7 +250,10 @@ function compute_hashes!(
             compute_hashes!(child, joinpath(path, name); HashType)
         end
     end
-    node.hash = git_hash(node, path; HashType)
+    node.hash = (
+        git_hash(node, path; HashType, skip_empty = false),
+        git_hash(node, path; HashType, skip_empty = true),
+    )
 end
 
 function verify_hashes!(
@@ -255,7 +261,6 @@ function verify_hashes!(
     node::PathNode,
     path::AbstractString;
     HashType::DataType,
-    skip_empty::Bool = false,
 )
     # helper to invoke the error handler callback
     err(msg::AbstractString) = handler(node, path, msg)
@@ -288,7 +293,7 @@ function verify_hashes!(
     else # file/executable
         if isfile(stat)
             hash = git_hash(node, path; HashType)
-            if node.hash != hash
+            if hash ∉ node.hash
                 err("file modified ($hash)")
             end
         elseif ispath(stat)
@@ -297,32 +302,6 @@ function verify_hashes!(
             err("missing file")
         end
     end
-
-    # check internal consistency
-    if node.type in (:directory, :symlink)
-        hash = git_hash(node; HashType)
-        if isdefined(node, :hash)
-            if node.hash != hash
-                err("hash inconsistency ($hash)")
-            end
-        else
-            node.hash = hash
-        end
-    end
-end
-
-function skip_empty_directories!(
-    node::PathNode;
-    HashType::DataType,
-)
-    node.type == :directory || return false
-    dirty = isempty(node.children)
-    for (name, child) in collect(node.children)
-        dirty |= skip_empty_directories!(child; HashType)
-    end
-    dirty || return false
-    node.hash = git_hash(node; HashType, skip_empty = true)
-    return true
 end
 
 function git_hash(
@@ -349,7 +328,7 @@ function git_hash(
                        child.type == :file       ? "100644" :
                        child.type == :symlink    ? "120000" : @assert false
                 print(io, mode, ' ', name, '\0')
-                write(io, hex2bytes(child.hash))
+                write(io, hex2bytes(child.hash[skip_empty+1]))
             end
         end
     elseif node.type == :symlink
@@ -357,7 +336,8 @@ function git_hash(
             write(io, node.link)
         end
     else # file/executable
-        path === nothing && error("git_hash called on file without a path")
+        path === nothing &&
+            error("git_hash called on file without a path")
         return git_object_hash("blob"; HashType) do io
             write(io, read(path))
         end
@@ -392,7 +372,7 @@ function symlink_target(node::PathNode, parts::Vector{<:AbstractString}, i::Int=
             symlink_target(node, parts, i+1)
         end
     elseif parts[i] == ".."
-       if node.type == :directory && isdefined(node, :parent)
+        if node.type == :directory && isdefined(node, :parent)
             symlink_target(node.parent, parts, i+1)
         end
     elseif node.type == :directory
@@ -414,7 +394,8 @@ node_path(node::PathNode) = node_path(nothing, node)
 function node_path(root::Union{AbstractString, Nothing}, node::PathNode)
     isdefined(node, :parent) || return root
     for (name, sibling) in node.parent.children
-        sibling === node && return if root === nothing
+        sibling === node || continue
+        return if root === nothing
             parent = node_path(node.parent)
             parent === nothing ? name : "$parent/$name"
         else
@@ -438,12 +419,14 @@ name_to_key(name::AbstractString)::String =
 key_to_name(key::AbstractString)::String =
     startswith(key, "./") ? chop(key, head=2, tail=0) : key
 
-function to_toml(node::PathNode)
+function to_toml(node::PathNode; skip_empty::Bool=false)
     dict = Dict{String,Any}()
     if node.type == :directory
         if !isdefined(node, :parent) || isempty(node.children)
-            dict["hash"] = node.hash
             dict["type"] = node.type
+        end
+        if !isdefined(node, :parent)
+            dict["hash"] = node.hash[skip_empty+1]
         end
         for (name, child) in node.children
             dict[name_to_key(name)] = to_toml(child)
@@ -456,25 +439,22 @@ function to_toml(node::PathNode)
         if node.type == :symlink
             dict["link"] = node.link
         else
-            dict["hash"] = node.hash
+            dict["hash"] = node.hash[skip_empty+1]
         end
         isdefined(node, :extra) && merge!(dict, node.extra)
     end
     return dict
 end
 
-function from_toml(data::Dict{<:AbstractString})
+function from_toml(
+    data::Dict{<:AbstractString};
+    HashType::DataType = SHA.SHA1_CTX,
+)
     type = get(data, "type", "directory")
     type in ("directory", "symlink", "file", "executable") ||
         error("invalid node type: $(repr(type))")
     type = Symbol(type)
     node = PathNode(type)
-    hash = get(data, "hash", nothing)
-    if hash !== nothing
-        hash isa AbstractString ||
-            error("invalid value for `hash` key: $(repr(hash))")
-        node.hash = normalize_hash(hash)
-    end
     link = get(data, "link", nothing)
     if link !== nothing
         link isa AbstractString ||
@@ -503,6 +483,26 @@ function from_toml(data::Dict{<:AbstractString})
             key in METADATA_KEYS && continue
             set_extra!(node, key, value)
         end
+    end
+    if type == :file || type == :executable
+        "hash" in keys(data) ||
+            error("file entry without hash value: $(repr(data))")
+    end
+    hash = get(data, "hash", nothing)
+    if hash !== nothing
+        hash isa AbstractString ||
+            error("invalid value for `hash` key: $(repr(hash))")
+        hash = normalize_hash(hash)
+    end
+    if type == :file || type == :executable
+        node.hash = (hash, hash)
+    else
+        node.hash = (
+            git_hash(node; HashType, skip_empty = false),
+            git_hash(node; HashType, skip_empty = true),
+        )
+        hash === nothing || hash in node.hash ||
+            error("internally inconsistent hash: $hash ∉ $(node.hash)")
     end
     return node
 end
