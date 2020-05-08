@@ -82,8 +82,8 @@ function verify_tree(
     root::AbstractString,
     hash::Union{AbstractString, Nothing} = nothing;
     HashType::DataType = SHA.SHA1_CTX,
+    tree::PathNode = tree_info(root; HashType),
 )
-    tree = tree_info(root; HashType)
     errors = Dict{String,Vector{String}}()
     verify_hashes!(tree, root; HashType) do node, path, msg
         haskey(errors, msg) || (errors[msg] = String[])
@@ -104,8 +104,9 @@ function repack_tree(
     root::AbstractString,
     hash::Union{AbstractString, Nothing} = nothing;
     HashType::DataType = SHA.SHA1_CTX,
+    tree::PathNode = tree_info(root; HashType),
 )
-    tree = tree_info(root)
+    # TODO
 end
 
 function patch_tree(
@@ -131,10 +132,8 @@ function tree_info(
 )
     # look for the `.tree_info.toml` file
     file = joinpath(root, ".tree_info.toml")
-    isdir(root) ||
-        error("no directory found at $root")
-    ispath(file) ||
-        error("no tree info file found at $file")
+    isdir(root) || error("no directory found at $root")
+    ispath(file) || error("no tree info file found at $file")
 
     # load data & convert to PathNode tree
     data = TOML.parsefile(file)
