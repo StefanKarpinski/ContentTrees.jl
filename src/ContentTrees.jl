@@ -8,6 +8,53 @@ import Random: randstring
 import SHA
 import Tar
 
+## PathNode type ##
+
+mutable struct PathNode
+    type::Symbol
+    hash::NTuple{2,String}
+    link::String
+    copy::Union{PathNode,Nothing}
+    parent::PathNode
+    children::Dict{String,PathNode}
+    extra::Dict{String,Any}
+    function PathNode(type::Symbol)
+        node = new(type)
+        if type == :directory
+            node.children = Dict{String,PathNode}()
+        end
+        return node
+    end
+end
+
+function PathNode(type::Symbol, parent::PathNode)
+    node = PathNode(type)
+    node.parent = parent
+    return node
+end
+
+function Base.show(io::IO, node::PathNode)
+    print(io, "PathNode(")
+    show(io, node.type)
+    for field in (:hash, :link)
+        if isdefined(node, field)
+            print(io, ", $field = ")
+            show(io, getfield(node, field))
+        end
+    end
+    if isdefined(node, :children)
+        print(io, ", children = {")
+        for (i, (name, child)) in enumerate(node.children)
+            i == 1 || print(io, ", ")
+            show(io, name)
+            print(io, " = ")
+            show(io, child)
+        end
+        print(io, "}")
+    end
+    print(io, ")")
+end
+
 ## main API ##
 
 function extract_tree(
@@ -143,52 +190,7 @@ function tree_info(
     return tree
 end
 
-## representing & manipulating a tree of path nodes ##
-
-mutable struct PathNode
-    type::Symbol
-    hash::NTuple{2,String}
-    link::String
-    copy::Union{PathNode,Nothing}
-    parent::PathNode
-    children::Dict{String,PathNode}
-    extra::Dict{String,Any}
-    function PathNode(type::Symbol)
-        node = new(type)
-        if type == :directory
-            node.children = Dict{String,PathNode}()
-        end
-        return node
-    end
-end
-
-function PathNode(type::Symbol, parent::PathNode)
-    node = PathNode(type)
-    node.parent = parent
-    return node
-end
-
-function Base.show(io::IO, node::PathNode)
-    print(io, "PathNode(")
-    show(io, node.type)
-    for field in (:hash, :link)
-        if isdefined(node, field)
-            print(io, ", $field = ")
-            show(io, getfield(node, field))
-        end
-    end
-    if isdefined(node, :children)
-        print(io, ", children = {")
-        for (i, (name, child)) in enumerate(node.children)
-            i == 1 || print(io, ", ")
-            show(io, name)
-            print(io, " = ")
-            show(io, child)
-        end
-        print(io, "}")
-    end
-    print(io, ")")
-end
+## manipulating a tree of path nodes ##
 
 function set_extra!(node::PathNode, key::String, value::Any)
     if !isdefined(node, :extra)
