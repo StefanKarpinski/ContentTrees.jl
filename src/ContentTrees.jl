@@ -155,8 +155,13 @@ function repack_tree(
 )
     Tar.write_tarball(tar, (root, tree)) do (sys_path, node), tar_path
         hdr = Tar.path_header(sys_path, tar_path)
-        hdr.type == node.type || hdr.type == :file && node.type == :executable ||
-            error("node type ≠ path type for $tar_path in $root")
+        matching =
+            node.type == :file       ? hdr.type == :file && hdr.mode == 0o644 :
+            node.type == :executable ? hdr.type == :file && hdr.mode == 0o755 :
+            node.type == hdr.type
+        matching ||
+            error("node type ($(node.type)) ≠ path type ($(hdr.type)) " *
+                  "for path $(repr(tar_path)) in $root")
         node.type != :directory && return hdr, sys_path
         children = Dict{String,Tuple{String,PathNode}}()
         for (name, child) in node.children
