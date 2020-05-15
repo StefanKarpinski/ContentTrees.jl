@@ -339,10 +339,45 @@ function git_hash(
     else # file/executable
         path === nothing &&
             error("git_hash called on file without a path")
-        return git_object_hash("blob"; HashType) do io
-            write(io, read(path))
-        end
+        return git_file_hash(path; HashType)
     end
+end
+
+function git_object_hash(
+    emit::Function,
+    kind::AbstractString;
+    HashType::DataType,
+)
+    ctx = HashType()
+    body = codeunits(sprint(emit))
+    SHA.update!(ctx, codeunits("$kind $(length(body))\0"))
+    SHA.update!(ctx, body)
+    return bytes2hex(SHA.digest!(ctx))
+end
+
+function git_file_hash(
+    path::AbstractString;
+    HashType::DataType,
+    buf::Vector{UInt8} = Vector{UInt8}(undef, 4096),
+)
+    ctx = HashType()
+    size = filesize(path)
+    SHA.update!(ctx, codeunits("blob $size\0"))
+    open(path) do io
+        while size > 0
+            n = min(size, length(buf))
+            r = readbytes!(io, buf, n)
+            r < n && eof(io) &&
+                error("file too small (size changed during hashing)")
+            v = view(buf, 1:min(r, size))
+            SHA.update!(ctx, v)
+            size -= length(v)
+        end
+        eof(io) ||
+            error("file too large (size changed during hashing)")
+    end
+    @assert size == 0
+    return bytes2hex(SHA.digest!(ctx))
 end
 
 function copy_symlinks(root::AbstractString, node::PathNode)
@@ -506,18 +541,6 @@ function from_toml(
             error("internally inconsistent hash: $hash ∉ $(node.hash)")
     end
     return node
-end
-
-function git_object_hash(
-    emit::Function,
-    kind::AbstractString;
-    HashType::DataType,
-)
-    ctx = HashType()
-    body = codeunits(sprint(emit))
-    SHA.update!(ctx, codeunits("$kind $(length(body))\0"))
-    SHA.update!(ctx, body)
-    return bytes2hex(SHA.digest!(ctx))
 end
 
 ## helper functions ##
