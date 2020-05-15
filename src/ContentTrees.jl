@@ -148,21 +148,19 @@ end
 
 function repack_tree(
     tarball::AbstractString,
-    root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing;
+    root::AbstractString;
     HashType::DataType = SHA.SHA1_CTX,
     tree::PathNode = tree_info(root; HashType),
 )
     open(tarball, write=true) do tar
-        repack_tree(tar, root, hash; HashType, tree)
+        repack_tree(tar, root; HashType, tree)
     end
     return tarball
 end
 
 function repack_tree(
     tar::IO,
-    root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing;
+    root::AbstractString;
     HashType::DataType = SHA.SHA1_CTX,
     tree::PathNode = tree_info(root; HashType),
 )
