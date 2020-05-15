@@ -1,12 +1,13 @@
 module ContentTrees
 
-export extract_tree, verify_tree, repack_tree
+export extract_tree, verify_tree, repack_tree, patch_tree
 
 import Logging
 import Pkg.TOML
 import Random: randstring
 import SHA
 import Tar
+import BSDiff
 
 ## PathNode type ##
 
@@ -63,6 +64,18 @@ function extract_tree(
     can_symlink::Union{Bool, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
 )
+    open(tarball) do tar
+        extract_tree(tar, root, hash; can_symlink, HashType)
+    end
+end
+
+function extract_tree(
+    tar::IO,
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    can_symlink::Union{Bool, Nothing} = nothing,
+    HashType::DataType = SHA.SHA1_CTX,
+)
     # remove destination first if it exists
     ispath(root) && @warn "path already exists, replacing" path=root
 
@@ -71,13 +84,11 @@ function extract_tree(
     temp, can_symlink = temp_path(root, can_symlink)
 
     # extract tarball, recording contents
-    open(tarball) do io
-        Tar.extract(io, temp) do hdr
-            executable = hdr.type == :file && (hdr.mode & 0o100) != 0
-            node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
-            hdr.type == :symlink && (node.link = hdr.link)
-            hdr.type != :symlink || can_symlink
-        end
+    Tar.extract(tar, temp) do hdr
+        executable = hdr.type == :file && (hdr.mode & 0o100) != 0
+        node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
+        hdr.type == :symlink && (node.link = hdr.link)
+        hdr.type != :symlink || can_symlink
     end
     resolve_symlinks!(tree)
     compute_hashes!(tree, temp; HashType)
@@ -177,12 +188,31 @@ function patch_tree(
     can_symlink::Union{Bool, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
     old_tree::PathNode = tree_info(old_root; HashType),
+    new_hash::Union{AbstractString, Nothing} = nothing,
 )
-    old_data = sprint() do io
-        repack_tree(io, old_root; HashType, tree=old_tree)
-    end
-    BSDiff.apply_patch(codeunits(old), diff) do io
-        extract_tree(io, new_root, new_hash; HashType)
+    old_data = sprint() do old_io
+        repack_tree(old_io, old_root; HashType, tree=old_tree)
+    end |> codeunits
+    open(patch_file) do patch_io
+        format = BSDiff.detect_format(patch_io, true)
+        patch_type = BSDiff.patch_type(format)
+        pipe = Base.BufferStream()
+        @sync begin
+            @async BSDiff.bspatch_core(
+                patch_type,
+                old_data,
+                new_root, # TODO: no file is correct here
+                pipe,
+                patch_io,
+            )
+            @async extract_tree(
+                pipe,
+                new_root,
+                new_hash;
+                can_symlink,
+                HashType,
+            )
+        end
     end
 end
 
