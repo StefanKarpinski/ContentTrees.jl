@@ -36,21 +36,20 @@ end
 function Base.show(io::IO, node::PathNode)
     print(io, "PathNode(")
     show(io, node.type)
-    for field in (:hash, :link)
-        if isdefined(node, field)
-            print(io, ", $field = ")
-            show(io, getfield(node, field))
+    if isdefined(node, :hash)
+        print(io, ", hash = ")
+        if node.hash[1] == node.hash[2]
+            show(io, node.hash[1])
+        else
+            show(io, node.hash)
         end
     end
+    if isdefined(node, :link)
+        print(io, ", link = ")
+        show(io, node.link)
+    end
     if isdefined(node, :children)
-        print(io, ", children = {")
-        for (i, (name, child)) in enumerate(node.children)
-            i == 1 || print(io, ", ")
-            show(io, name)
-            print(io, " = ")
-            show(io, child)
-        end
-        print(io, "}")
+        print(io, ", $(length(node.children)) children")
     end
     print(io, ")")
 end
@@ -72,7 +71,7 @@ function extract_tree(
     temp, can_symlink = temp_path(root, can_symlink)
 
     # extract tarball, recording contents
-    open(`gzcat $tarball`) do io
+    open(tarball) do io
         Tar.extract(io, temp) do hdr
             executable = hdr.type == :file && (hdr.mode & 0o100) != 0
             node = path_node!(tree, hdr.path, executable ? :executable : hdr.type)
@@ -172,14 +171,15 @@ function repack_tree(
 end
 
 function patch_tree(
-    patch::AbstractString,
     old_root::AbstractString,
-    new_root::AbstractString;
+    new_root::AbstractString,
+    patch_file::AbstractString;
     can_symlink::Union{Bool, Nothing} = nothing,
     HashType::DataType = SHA.SHA1_CTX,
+    old_tree::PathNode = tree_info(old_root; HashType),
 )
-    old = sprint() do io
-        repack_tree(io, old_root, old_hash; HashType)
+    old_data = sprint() do io
+        repack_tree(io, old_root; HashType, tree=old_tree)
     end
     BSDiff.apply_patch(codeunits(old), diff) do io
         extract_tree(io, new_root, new_hash; HashType)
