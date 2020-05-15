@@ -1,6 +1,6 @@
 module ContentTrees
 
-export extract_tree, verify_tree
+export extract_tree, verify_tree, repack_tree
 
 import Logging
 import Pkg.TOML
@@ -153,7 +153,32 @@ function repack_tree(
     HashType::DataType = SHA.SHA1_CTX,
     tree::PathNode = tree_info(root; HashType),
 )
-    # TODO
+    Tar.write_tarball(tar, (root, tree)) do (sys_path, node), tar_path
+        hdr = Tar.path_header(sys_path, tar_path)
+        hdr.type == node.type || hdr.type == :file && node.type == :executable ||
+            error("node type ≠ path type for $tar_path in $root")
+        node.type != :directory && return hdr, sys_path
+        children = Dict{String,Tuple{String,PathNode}}()
+        for (name, child) in node.children
+            sys_path′ = joinpath(sys_path, name)
+            children[name] = (sys_path′, child)
+        end
+        return hdr, children
+    end
+    return tar
+end
+
+function repack_tree(
+    tarball::AbstractString,
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    HashType::DataType = SHA.SHA1_CTX,
+    tree::PathNode = tree_info(root; HashType),
+)
+    open(tarball, write=true) do tar
+        repack_tree(tar, root, hash; HashType, tree)
+    end
+    return tarball
 end
 
 function patch_tree(
