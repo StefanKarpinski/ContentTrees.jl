@@ -153,22 +153,9 @@ function repack_tree(
     HashType::DataType = SHA.SHA1_CTX,
     tree::PathNode = tree_info(root; HashType),
 )
-    Tar.write_tarball(tar, (root, tree)) do (sys_path, node), tar_path
-        hdr = Tar.path_header(sys_path, tar_path)
-        matching =
-            node.type == :file       ? hdr.type == :file && hdr.mode == 0o644 :
-            node.type == :executable ? hdr.type == :file && hdr.mode == 0o755 :
-            node.type == hdr.type
-        matching ||
-            error("node type ($(node.type)) ≠ path type ($(hdr.type)) " *
-                  "for path $(repr(tar_path)) in $root")
-        node.type != :directory && return hdr, sys_path
-        children = Dict{String,Tuple{String,PathNode}}()
-        for (name, child) in node.children
-            sys_path′ = joinpath(sys_path, name)
-            children[name] = (sys_path′, child)
-        end
-        return hdr, children
+    Tar.write_tarball(tar, tree) do node, tar_path
+        hdr, sys_path = node_header(root, node, tar_path)
+        hdr, node.type == :directory ? node.children : sys_path
     end
     return tar
 end
@@ -455,20 +442,33 @@ function follow_symlinks(node::PathNode, seen::Vector{PathNode})
     return follow_symlinks(node.copy, push!(seen, node))
 end
 
-node_path(node::PathNode) = node_path(nothing, node)
+node_path(node::PathNode) = something(node_path(nothing, node), ".")
 
 function node_path(root::Union{AbstractString, Nothing}, node::PathNode)
     isdefined(node, :parent) || return root
     for (name, sibling) in node.parent.children
         sibling === node || continue
-        return if root === nothing
-            parent = node_path(node.parent)
+        parent = node_path(root, node.parent)
+        return root !== nothing ? joinpath(parent, name) :
             parent === nothing ? name : "$parent/$name"
-        else
-            joinpath(node_path(root, node.parent), name)
-        end
     end
     error("internal error: node doesn't appear in parent's children")
+end
+
+function node_header(
+    root::AbstractString,
+    node::PathNode,
+    tar_path::AbstractString = node_path(node),
+)
+    sys_path = node_path(root, node)
+    hdr = Tar.path_header(sys_path, tar_path)
+    matching =
+        node.type == :file       ? hdr.type == :file && hdr.mode == 0o644 :
+        node.type == :executable ? hdr.type == :file && hdr.mode == 0o755 :
+        node.type == hdr.type
+    matching && return hdr, sys_path
+    error("node type ($(node.type)) ≠ path type ($(hdr.type)) " *
+          "for path $(repr(tar_path)) in $root")
 end
 
 is_empty_directory(node::PathNode) =
