@@ -147,6 +147,19 @@ function verify_tree(
 end
 
 function repack_tree(
+    tarball::AbstractString,
+    root::AbstractString,
+    hash::Union{AbstractString, Nothing} = nothing;
+    HashType::DataType = SHA.SHA1_CTX,
+    tree::PathNode = tree_info(root; HashType),
+)
+    open(tarball, write=true) do tar
+        repack_tree(tar, root, hash; HashType, tree)
+    end
+    return tarball
+end
+
+function repack_tree(
     tar::IO,
     root::AbstractString,
     hash::Union{AbstractString, Nothing} = nothing;
@@ -158,19 +171,6 @@ function repack_tree(
         hdr, node.type == :directory ? node.children : sys_path
     end
     return tar
-end
-
-function repack_tree(
-    tarball::AbstractString,
-    root::AbstractString,
-    hash::Union{AbstractString, Nothing} = nothing;
-    HashType::DataType = SHA.SHA1_CTX,
-    tree::PathNode = tree_info(root; HashType),
-)
-    open(tarball, write=true) do tar
-        repack_tree(tar, root, hash; HashType, tree)
-    end
-    return tarball
 end
 
 function patch_tree(
